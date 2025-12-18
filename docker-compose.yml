@@ -1,0 +1,55 @@
+services:
+  # Ollama 服务
+  ollama:
+    image: ollama/ollama:latest
+    container_name: ollama
+    restart: unless-stopped
+    ports:
+      - "11434:11434"
+    volumes:
+      - ./ollama_data:/root/.ollama
+    shm_size: 4gb
+    networks:
+      - subtitle-network
+    
+    # --- 修正这里 ---
+    # 物理锁核：强制绑定在 0,1,2,3 号核心
+    # 注意：这必须是顶层配置，不能放在 deploy 里
+    cpuset: "0-4"
+    
+    # 算力限制：限制总算力不超过 4.0 个核（双重保险）
+    deploy:
+      resources:
+        limits:
+          cpus: '5.0'
+
+  # 字幕管家服务
+  nas-subtitle:
+    build: .
+    container_name: nas-subtitle
+    restart: unless-stopped
+    ports:
+      - "8501:8501"
+    volumes:
+      - ./data:/data
+      - /vol2/1000/MyCloud/Downloads/迅雷:/media/movies
+    environment:
+      - TZ=Asia/Shanghai
+      - PYTHONUNBUFFERED=1
+    shm_size: 4gb
+    networks:
+      - subtitle-network
+    depends_on:
+      - ollama
+      
+    # --- 修正这里 ---
+    cpuset: "0-4"
+    
+    deploy:
+      resources:
+        limits:
+          cpus: '5.0'
+
+networks:
+  subtitle-network:
+    driver: bridge

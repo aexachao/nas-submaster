@@ -1,0 +1,6 @@
+streamlit
+faster-whisper
+openai>=1.50.0
+pandas
+watchdog
+httpx==0.27.2
