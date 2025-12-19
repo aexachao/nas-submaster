@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-NAS 字幕管家 (重构版) V6.0.0
+NAS 字幕管家 (重构版) V6.0.1
 主要改进：
 1. 分离数据访问层、业务逻辑层、UI层
 2. 统一配置管理，修复状态丢失问题
@@ -553,20 +553,46 @@ def translate_subtitles(srt_path: str, config: AppConfig, task_id: int) -> bool:
 
 内容如下：
 {rebuild_srt(batch)}"""
-            try:
-                resp = client.chat.completions.create(model=config.model_name, messages=[{"role": "user", "content": prompt}], temperature=0.3, timeout=90)
-                parsed = parse_srt_content(resp.choices[0].message.content.strip())
-                if len(parsed) == len(batch):
-                    trans_subs.extend(parsed)
-                else:
-                    trans_subs.extend(batch)
-                    TaskDAO.update_task(task_id, log=f"⚠️ 第 {batch_num} 批格式异常，保留原文")
-            except Exception as e:
-                print(f"Translation batch {batch_num} failed: {e}")
-                trans_subs.extend(batch)
-                TaskDAO.update_task(task_id, log=f"❌ API错误: {str(e)}")
+            
+            # 增加重试逻辑
+            max_retries = 3
+            success = False
+            
+            for retry in range(max_retries):
+                try:
+                    resp = client.chat.completions.create(
+                        model=config.model_name, 
+                        messages=[{"role": "user", "content": prompt}], 
+                        temperature=0.3, 
+                        timeout=180
+                    )
+                    parsed = parse_srt_content(resp.choices[0].message.content.strip())
+                    
+                    if len(parsed) == len(batch):
+                        trans_subs.extend(parsed)
+                        success = True
+                        break  # 成功，跳出重试循环
+                    else:
+                        trans_subs.extend(batch)
+                        TaskDAO.update_task(task_id, log=f"⚠️ 第 {batch_num} 批格式异常，保留原文")
+                        success = True
+                        break
+                        
+                except Exception as e:
+                    print(f"Translation batch {batch_num} attempt {retry+1} failed: {e}")
+                    
+                    if retry < max_retries - 1:
+                        # 还有重试机会
+                        TaskDAO.update_task(task_id, log=f"第 {batch_num} 批失败，重试 {retry+1}/{max_retries}...")
+                        time.sleep(2)  # 等待 2 秒后重试
+                    else:
+                        # 最后一次也失败了
+                        trans_subs.extend(batch)
+                        TaskDAO.update_task(task_id, log=f"❌ 第 {batch_num} 批重试 {max_retries} 次均失败，保留原文")
+            
             progress = 50 + int((batch_num / total_batches) * 45)
             TaskDAO.update_task(task_id, progress=progress)
+            
         out_path = Path(srt_path).parent / f"{Path(srt_path).stem}.{config.target_language}.srt"
         with open(out_path, 'w', encoding='utf-8') as f:
             f.write(rebuild_srt(trans_subs))
@@ -625,6 +651,25 @@ def process_video_file(task_id: int, file_path: str, config: AppConfig):
         TaskDAO.update_task(task_id, status='failed', log=f"异常: {e}")
 
 def worker_thread():
+    """后台工作线程 - 等待数据库初始化"""
+    # 等待数据库就绪
+    max_retries = 30
+    for i in range(max_retries):
+        try:
+            conn = get_db_connection()
+            conn.execute("SELECT 1 FROM config LIMIT 1")
+            conn.close()
+            print("[Worker] Database ready, starting...")
+            break
+        except:
+            if i == 0:
+                print("[Worker] Waiting for database...")
+            time.sleep(1)
+    else:
+        print("[Worker] ERROR: Database timeout")
+        return
+    
+    # 主循环
     while True:
         try:
             config = AppConfig.load_from_db()
@@ -803,10 +848,16 @@ def main():
     with tab2:
         render_task_queue()
 
+
 if __name__ == "__main__":
     os.makedirs("/data/models", exist_ok=True)
     init_database()
+    
+    # 使用 Streamlit 的 session_state 来控制 worker 启动
     if 'worker_started' not in st.session_state:
+        print("[Main] Starting worker thread...")
         threading.Thread(target=worker_thread, daemon=True).start()
         st.session_state.worker_started = True
+        print("[Main] Worker thread started")
+    
     main()
