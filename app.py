@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-NAS 字幕管家 (重构版) V6.0.1
+NAS 字幕管家 (重构版) V6.1.1
 主要改进：
 1. 分离数据访问层、业务逻辑层、UI层
 2. 统一配置管理，修复状态丢失问题
@@ -9,6 +9,7 @@ NAS 字幕管家 (重构版) V6.0.1
 4. 修复UI布局问题
 5. 新增字幕筛选功能
 6. 修复字幕语言识别逻辑
+7. 新增翻译质量检测
 """
 
 import os
@@ -158,6 +159,12 @@ HERO_CSS = """
     div[data-testid="stCheckbox"] label {
         min-height: 0px !important;
         margin-bottom: 0px !important;
+    }
+    
+    div[data-testid="column"]:has(div[data-testid="stCheckbox"]) {
+        flex: 0 0 auto !important;
+        width: auto !important;
+        min-width: 40px !important;
     }
     
     .task-card-wrapper {
@@ -397,8 +404,6 @@ def format_file_size(size_bytes: int) -> str:
     return f"{size_bytes:.1f} TB"
 
 def detect_lang_by_content(srt_path: str) -> str:
-    MIN_HIRAGANA, MIN_KATAKANA, MIN_HANGUL = 5, 5, 10
-    MIN_CHINESE, MIN_TRAD_MARKERS, TRAD_RATIO, ENG_RATIO = 10, 3, 0.2, 0.5
     try:
         with open(srt_path, 'r', encoding='utf-8', errors='ignore') as f:
             raw = f.read(4096)
@@ -415,21 +420,20 @@ def detect_lang_by_content(srt_path: str) -> str:
         trad = sum(1 for c in trad_m if c in content)
         eng_w = re.findall(r'\b[a-zA-Z]{3,}\b', content)
         eng_c = sum(len(w) for w in eng_w)
-        if hira >= MIN_HIRAGANA or kata >= MIN_KATAKANA:
+        if hira >= 5 or kata >= 5:
             return 'ja'
-        if hang >= MIN_HANGUL:
+        if hang >= 10:
             return 'ko'
-        if cn >= MIN_CHINESE:
-            if trad >= MIN_TRAD_MARKERS and trad / cn >= TRAD_RATIO:
+        if cn >= 10:
+            if trad >= 3 and trad / cn >= 0.2:
                 return 'cht'
             return 'chs'
-        if eng_c / total >= ENG_RATIO:
+        if total > 0 and eng_c / total >= 0.5:
             return 'en'
         return 'unknown'
     except Exception as e:
         print(f"Language detection failed for {srt_path}: {e}")
         return 'unknown'
-# 这是第二部分，接在第一部分后面
 
 def scan_file_subtitles(video_path: Path) -> str:
     subs_list, base_name, parent_dir = [], video_path.stem, video_path.parent
@@ -458,7 +462,6 @@ def scan_file_subtitles(video_path: Path) -> str:
     except Exception as e:
         print(f"Failed to scan subtitles for {video_path}: {e}")
     return json.dumps(subs_list, ensure_ascii=False)
-
 def scan_media_directory(directory: str = MEDIA_ROOT, debug: bool = False) -> Tuple[int, List[str]]:
     conn = get_db_connection()
     added, debug_logs, path = 0, [], Path(directory)
@@ -527,23 +530,72 @@ def parse_srt_content(content: str) -> List[Dict]:
 def rebuild_srt(subs: List[Dict]) -> str:
     return '\n'.join([f"{s['index']}\n{s['timecode']}\n{s['text']}\n" for s in subs])
 
+def check_translation_quality(original_subs: List[Dict], translated_subs: List[Dict], source_lang: str) -> Tuple[int, int, float]:
+    """检查翻译质量
+    返回: (成功行数, 失败行数, 成功率)
+    """
+    if len(original_subs) != len(translated_subs):
+        return 0, len(original_subs), 0.0
+    
+    success_count = 0
+    fail_count = 0
+    
+    for orig, trans in zip(original_subs, translated_subs):
+        orig_text = orig['text'].strip()
+        trans_text = trans['text'].strip()
+        
+        # 检查 1: 译文和原文是否完全相同
+        if orig_text == trans_text:
+            fail_count += 1
+            continue
+        
+        # 检查 2: 是否还包含原语言字符
+        if source_lang in ['ja', 'jpn']:
+            # 日语：检查假名
+            if re.search(r'[\u3040-\u309f\u30a0-\u30ff]', trans_text):
+                fail_count += 1
+                continue
+        elif source_lang in ['ko', 'kor']:
+            # 韩语：检查韩文字符
+            if re.search(r'[\uac00-\ud7af]', trans_text):
+                fail_count += 1
+                continue
+        
+        success_count += 1
+    
+    total = len(original_subs)
+    success_rate = success_count / total if total > 0 else 0
+    
+    return success_count, fail_count, success_rate
+
 def translate_subtitles(srt_path: str, config: AppConfig, task_id: int) -> bool:
+    """翻译字幕文件 - 增加质量检测"""
     try:
         with open(srt_path, 'r', encoding='utf-8') as f:
             content = f.read()
+        
         subs = parse_srt_content(content)
         if not subs:
             TaskDAO.update_task(task_id, log="字幕解析失败")
             return False
+        
         api_key = config.api_key
         if "ollama" in config.base_url.lower() or "host.docker.internal" in config.base_url:
             api_key = "ollama"
+        
         client = OpenAI(api_key=api_key, base_url=config.base_url)
         target_name = get_lang_name(config.target_language)
-        trans_subs, total_batches = [], (len(subs) + BATCH_SIZE - 1) // BATCH_SIZE
+        
+        trans_subs = []
+        total_batches = (len(subs) + BATCH_SIZE - 1) // BATCH_SIZE
+        failed_batches = []
+        
         for i in range(0, len(subs), BATCH_SIZE):
-            batch, batch_num = subs[i:i+BATCH_SIZE], i // BATCH_SIZE + 1
+            batch = subs[i:i+BATCH_SIZE]
+            batch_num = i // BATCH_SIZE + 1
+            
             TaskDAO.update_task(task_id, log=f"正在翻译第 {batch_num}/{total_batches} 批...")
+            
             prompt = f"""你是一名资深的电影字幕翻译。请将以下字幕翻译成{target_name}。
 翻译原则：
 1. 信达雅：译文要通顺、符合中文口语习惯。
@@ -554,49 +606,70 @@ def translate_subtitles(srt_path: str, config: AppConfig, task_id: int) -> bool:
 内容如下：
 {rebuild_srt(batch)}"""
             
-            # 增加重试逻辑
             max_retries = 3
-            success = False
+            batch_success = False
             
             for retry in range(max_retries):
                 try:
                     resp = client.chat.completions.create(
-                        model=config.model_name, 
-                        messages=[{"role": "user", "content": prompt}], 
-                        temperature=0.3, 
+                        model=config.model_name,
+                        messages=[{"role": "user", "content": prompt}],
+                        temperature=0.3,
                         timeout=180
                     )
+                    
                     parsed = parse_srt_content(resp.choices[0].message.content.strip())
                     
                     if len(parsed) == len(batch):
                         trans_subs.extend(parsed)
-                        success = True
-                        break  # 成功，跳出重试循环
+                        batch_success = True
+                        break
                     else:
                         trans_subs.extend(batch)
                         TaskDAO.update_task(task_id, log=f"⚠️ 第 {batch_num} 批格式异常，保留原文")
-                        success = True
+                        failed_batches.append(batch_num)
                         break
                         
                 except Exception as e:
                     print(f"Translation batch {batch_num} attempt {retry+1} failed: {e}")
                     
                     if retry < max_retries - 1:
-                        # 还有重试机会
                         TaskDAO.update_task(task_id, log=f"第 {batch_num} 批失败，重试 {retry+1}/{max_retries}...")
-                        time.sleep(2)  # 等待 2 秒后重试
+                        time.sleep(2)
                     else:
-                        # 最后一次也失败了
                         trans_subs.extend(batch)
-                        TaskDAO.update_task(task_id, log=f"❌ 第 {batch_num} 批重试 {max_retries} 次均失败，保留原文")
+                        failed_batches.append(batch_num)
+                        TaskDAO.update_task(task_id, log=f"❌ 第 {batch_num} 批重试 {max_retries} 次均失败")
             
-            progress = 50 + int((batch_num / total_batches) * 45)
+            progress = 50 + int((batch_num / total_batches) * 40)
             TaskDAO.update_task(task_id, progress=progress)
-            
+        
+        # 翻译完成，检查质量
+        TaskDAO.update_task(task_id, progress=95, log="检查翻译质量...")
+        
+        success_count, fail_count, success_rate = check_translation_quality(subs, trans_subs, config.source_language)
+        
+        # 保存翻译结果
         out_path = Path(srt_path).parent / f"{Path(srt_path).stem}.{config.target_language}.srt"
         with open(out_path, 'w', encoding='utf-8') as f:
             f.write(rebuild_srt(trans_subs))
-        return True
+        
+        # 根据质量判断状态
+        if success_rate >= 0.95:
+            final_log = f"✅ 翻译完成 ({success_count}/{len(subs)} 行)"
+            TaskDAO.update_task(task_id, log=final_log)
+            return True
+        elif success_rate >= 0.80:
+            final_log = f"⚠️ 部分翻译 ({success_count}/{len(subs)} 行, {int(success_rate*100)}%)"
+            TaskDAO.update_task(task_id, log=final_log)
+            return True
+        else:
+            final_log = f"❌ 翻译质量差 ({success_count}/{len(subs)} 行, {int(success_rate*100)}%)"
+            if failed_batches:
+                final_log += f" | 失败批次: {', '.join(map(str, failed_batches[:5]))}"
+            TaskDAO.update_task(task_id, log=final_log)
+            return False
+            
     except Exception as e:
         print(f"Translation failed: {e}")
         TaskDAO.update_task(task_id, log=f"翻译异常: {e}")
@@ -652,7 +725,6 @@ def process_video_file(task_id: int, file_path: str, config: AppConfig):
 
 def worker_thread():
     """后台工作线程 - 等待数据库初始化"""
-    # 等待数据库就绪
     max_retries = 30
     for i in range(max_retries):
         try:
@@ -669,7 +741,6 @@ def worker_thread():
         print("[Worker] ERROR: Database timeout")
         return
     
-    # 主循环
     while True:
         try:
             config = AppConfig.load_from_db()
@@ -848,12 +919,10 @@ def main():
     with tab2:
         render_task_queue()
 
-
 if __name__ == "__main__":
     os.makedirs("/data/models", exist_ok=True)
     init_database()
     
-    # 使用 Streamlit 的 session_state 来控制 worker 启动
     if 'worker_started' not in st.session_state:
         print("[Main] Starting worker thread...")
         threading.Thread(target=worker_thread, daemon=True).start()
