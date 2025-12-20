@@ -25,6 +25,11 @@ import streamlit as st
 import pandas as pd
 from faster_whisper import WhisperModel
 from openai import OpenAI
+import logging
+
+# 抑制 Tornado WebSocket 关闭警告
+logging.getLogger('tornado.application').setLevel(logging.ERROR)
+logging.getLogger('tornado.access').setLevel(logging.ERROR)
 
 # ============================================================================
 # 常量定义
@@ -678,9 +683,26 @@ def process_video_file(task_id: int, file_path: str, config: AppConfig):
                 TaskDAO.update_task(task_id, status='failed', log=f"模型加载失败: {e}")
                 return
             TaskDAO.update_task(task_id, progress=10, log="正在提取...")
-            params = {'audio': file_path, 'beam_size': 5, 'vad_filter': True}
+            
+            # faster-whisper 支持的参数
+            params = {
+                'audio': file_path,
+                'beam_size': 5,
+                'vad_filter': True,
+                'vad_parameters': {
+                    'threshold': 0.3,
+                    'min_speech_duration_ms': 100,
+                    'min_silence_duration_ms': 1500,
+                    'speech_pad_ms': 300,
+                },
+                'word_timestamps': True,
+                'condition_on_previous_text': True,
+                'temperature': [0.0, 0.2, 0.4, 0.6, 0.8, 1.0],
+            }
+            
             if config.source_language != 'auto':
                 params['language'] = config.source_language
+            
             try:
                 segments, info = model.transcribe(**params)
                 TaskDAO.update_task(task_id, progress=15, log=f"语言: {get_lang_name(info.language)}")
@@ -693,6 +715,7 @@ def process_video_file(task_id: int, file_path: str, config: AppConfig):
             except Exception as e:
                 TaskDAO.update_task(task_id, status='failed', log=f"提取失败: {e}")
                 return
+        
         if config.enable_translation:
             TaskDAO.update_task(task_id, progress=50, log="准备翻译...")
             success = translate_subtitles(str(srt_path), config, task_id)
@@ -702,6 +725,7 @@ def process_video_file(task_id: int, file_path: str, config: AppConfig):
                 TaskDAO.update_task(task_id, status='failed', progress=100, log="翻译失败")
         else:
             TaskDAO.update_task(task_id, status='completed', progress=100, log="完成")
+        
         subs_json = scan_file_subtitles(Path(file_path))
         has_translated = ".zh.srt" in subs_json or ".chs.srt" in subs_json
         MediaDAO.update_media_subtitles(file_path, subs_json, has_translated)
@@ -812,17 +836,26 @@ def render_config_sidebar():
     return debug_mode
 
 def render_media_library(debug_mode: bool):
+    """渲染媒体库页面 - 修复全选状态同步问题"""
     col_filter, col_refresh, col_start = st.columns([2, 2, 2])
+    
     with col_filter:
         filter_type = st.radio("筛选", ["全部", "有字幕", "无字幕"], horizontal=True, label_visibility="collapsed")
+    
     filter_map = {"全部": "all", "有字幕": "has_subtitle", "无字幕": "no_subtitle"}
+    
     with col_refresh:
         if st.button("刷新媒体库", use_container_width=True):
             with st.spinner("扫描中..."):
                 cnt, logs = scan_media_directory(debug=debug_mode)
                 st.toast(f"更新 {cnt} 个文件")
+    
+    # 获取文件列表
     files = MediaDAO.get_media_files(filter_map[filter_type])
+    
+    # *** 修复 1：先计算选中数量（在渲染按钮之前）***
     selected_count = sum(1 for f in files if st.session_state.get(f"s_{f['id']}", False))
+    
     with col_start:
         btn_txt = f"开始处理 ({selected_count})" if selected_count > 0 else "开始处理"
         if st.button(btn_txt, type="primary", use_container_width=True, disabled=(selected_count == 0)):
@@ -842,35 +875,54 @@ def render_media_library(debug_mode: bool):
                 st.toast(f"已添加 {success_count} 个任务")
             time.sleep(1)
             st.rerun()
+    
     st.markdown("<div style='height:12px'></div>", unsafe_allow_html=True)
+    
     if not files:
         st.info("🔭 暂无文件")
-    else:
-        if st.checkbox("全选", key="select_all_box"):
+        return
+    
+    # *** 修复 2：全选 checkbox 状态变化时立即 rerun ***
+    current_select_all = st.checkbox("全选", key="select_all_box")
+    last_select_all = st.session_state.get("_last_select_all", False)
+    
+    # 检测状态是否改变
+    if current_select_all != last_select_all:
+        if current_select_all:
+            # 全选：设置所有文件为选中
             for f in files:
                 st.session_state[f"s_{f['id']}"] = True
         else:
-            if st.session_state.get("_last_select_all", False):
-                for f in files:
-                    st.session_state[f"s_{f['id']}"] = False
-        st.session_state["_last_select_all"] = st.session_state.get("select_all_box", False)
-        for f in files:
-            subs, badges = f['subtitles'], ""
-            if not subs:
-                badges = "<span class='status-chip chip-red'>无字幕</span>"
-            else:
-                for sub in subs:
-                    lang = sub['lang'].lower()
-                    cls = "chip-green" if lang in ['zh', 'chs', 'cht'] else "chip-blue" if lang in ['en', 'eng'] else "chip-gray"
-                    badges += f"<span class='status-chip {cls}'>{sub['tag']}</span>"
-            c_check, c_card = st.columns([0.5, 20], gap="medium", vertical_alignment="center")
-            with c_check:
-                key = f"s_{f['id']}"
-                if key not in st.session_state:
-                    st.session_state[key] = False
-                st.checkbox("选", key=key, label_visibility="collapsed")
-            with c_card:
-                st.markdown(f"""<div class="hero-card"><div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;"><div style="font-weight:600; font-size:15px; color:#f4f4f5; overflow:hidden; white-space:nowrap; text-overflow:ellipsis;">{f['file_name']}</div><div style="font-size:12px; color:#71717a; min-width:60px; text-align:right;">{format_file_size(f['file_size'])}</div></div><div style="font-size:12px; color:#52525b; margin-bottom:12px; font-family:monospace;">{f['file_path']}</div><div>{badges}</div></div>""", unsafe_allow_html=True)
+            # 取消全选：设置所有文件为未选中
+            for f in files:
+                st.session_state[f"s_{f['id']}"] = False
+        
+        # 保存当前状态
+        st.session_state["_last_select_all"] = current_select_all
+        
+        # *** 关键：立即触发 rerun 以更新按钮 ***
+        st.rerun()
+    
+    # 渲染文件列表
+    for f in files:
+        subs, badges = f['subtitles'], ""
+        if not subs:
+            badges = "<span class='status-chip chip-red'>无字幕</span>"
+        else:
+            for sub in subs:
+                lang = sub['lang'].lower()
+                cls = "chip-green" if lang in ['zh', 'chs', 'cht'] else "chip-blue" if lang in ['en', 'eng'] else "chip-gray"
+                badges += f"<span class='status-chip {cls}'>{sub['tag']}</span>"
+        
+        c_check, c_card = st.columns([0.5, 20], gap="medium", vertical_alignment="center")
+        with c_check:
+            key = f"s_{f['id']}"
+            if key not in st.session_state:
+                st.session_state[key] = False
+            st.checkbox("选", key=key, label_visibility="collapsed")
+        
+        with c_card:
+            st.markdown(f"""<div class="hero-card"><div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;"><div style="font-weight:600; font-size:15px; color:#f4f4f5; overflow:hidden; white-space:nowrap; text-overflow:ellipsis;">{f['file_name']}</div><div style="font-size:12px; color:#71717a; min-width:60px; text-align:right;">{format_file_size(f['file_size'])}</div></div><div style="font-size:12px; color:#52525b; margin-bottom:12px; font-family:monospace;">{f['file_path']}</div><div>{badges}</div></div>""", unsafe_allow_html=True)
 
 def render_task_queue():
     col_space, col_clear = st.columns([8, 2])
@@ -878,10 +930,15 @@ def render_task_queue():
         if st.button("清理记录", use_container_width=True):
             TaskDAO.clear_completed_tasks()
             st.rerun()
+    
     tasks = TaskDAO.get_all_tasks()
     if not tasks:
         st.info("🔭 队列为空")
         return
+    
+    # *** 关键修改：检查是否有处理中的任务 ***
+    has_processing = any(t['status'] == 'processing' for t in tasks)
+    
     for t in tasks:
         status_map = {'pending': ('chip-gray', '等待中'), 'processing': ('chip-blue', '处理中'), 'completed': ('chip-green', '完成'), 'failed': ('chip-red', '失败')}
         css_class, status_text = status_map.get(t['status'], ('chip-gray', t['status']))
@@ -907,8 +964,11 @@ def render_task_queue():
                 if st.button("删除", key=f"del_{t['id']}", use_container_width=True):
                     TaskDAO.delete_task(t['id'])
                     st.rerun()
-    time.sleep(3)
-    st.rerun()
+    
+    # *** 关键修改：只在有处理中任务时才自动刷新 ***
+    if has_processing:
+        time.sleep(3)
+        st.rerun()
 
 def main():
     st.set_page_config(page_title="NAS 字幕管家", page_icon="🎬", layout="wide")
