@@ -15,7 +15,7 @@
 
 ## 📸 截图预览
 
-!(docs/images/dashboard.png)
+![截图](docs/images/dashboard.png)
 
 ## 🚀 快速开始
 
