@@ -15,9 +15,7 @@
 
 ## 📸 截图预览
 
-```
-![Dashboard](docs/images/dashboard.png)
-```
+![仪表板](docs/images/dashboard.png)
 
 ## 🚀 快速开始
 
