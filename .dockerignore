@@ -1,0 +1,8 @@
+# .dockerignore
+__pycache__
+*.pyc
+.git
+.venv
+data/
+media/
+.DS_Store
