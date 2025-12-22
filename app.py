@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-NAS 字幕管家 (重构版) V6.2.0
+NAS 字幕管家 (重构版) V7.0.0
 主要改进：
-1. 多提供商配置管理 - 每个提供商独立保存配置
-2. 切换提供商时自动加载对应配置
-3. 改进翻译质量检测
-4. 修复 Worker 线程启动时序问题
+1. 翻译模块独立化（translator.py）
+2. 使用 JSON 格式强制结构化输出
+3. 智能分段翻译策略
+4. 完善错误处理和进度反馈
 """
 
 import os
@@ -24,8 +24,16 @@ from enum import Enum
 import streamlit as st
 import pandas as pd
 from faster_whisper import WhisperModel
-from openai import OpenAI
 import logging
+
+# 导入新的翻译模块
+from translator import (
+    SubtitleTranslator,
+    TranslationConfig,
+    parse_srt_file,
+    save_srt_file,
+    translate_srt_file
+)
 
 # 抑制 Tornado WebSocket 关闭警告
 logging.getLogger('tornado.application').setLevel(logging.ERROR)
@@ -37,7 +45,6 @@ logging.getLogger('tornado.access').setLevel(logging.ERROR)
 DB_PATH = "/data/subtitle_manager.db"
 MEDIA_ROOT = "/media"
 SUPPORTED_VIDEO_EXTENSIONS = {'.mp4', '.mkv', '.mov', '.avi', '.flv', '.wmv', '.m4v', '.webm', '.ts'}
-BATCH_SIZE = 15
 
 ISO_LANG_MAP = {
     'auto': '自动检测',
@@ -202,6 +209,7 @@ class AppConfig:
     target_language: str = 'zh'
     current_provider: str = 'Ollama (本地模型)'
     provider_configs: Dict[str, ProviderConfig] = None
+    max_lines_per_batch: int = 500  # 新增：每批最多翻译行数
     
     def __post_init__(self):
         if self.provider_configs is None:
@@ -214,7 +222,6 @@ class AppConfig:
             cursor = conn.execute("SELECT key, value FROM config")
             config_dict = {row[0]: row[1] for row in cursor.fetchall()}
             
-            # 加载多提供商配置
             provider_configs_json = config_dict.get('provider_configs', '{}')
             try:
                 provider_configs_data = json.loads(provider_configs_json)
@@ -232,7 +239,8 @@ class AppConfig:
                 enable_translation=config_dict.get('enable_translation', 'false') == 'true',
                 target_language=config_dict.get('target_language', 'zh'),
                 current_provider=config_dict.get('current_provider', 'Ollama (本地模型)'),
-                provider_configs=provider_configs
+                provider_configs=provider_configs,
+                max_lines_per_batch=int(config_dict.get('max_lines_per_batch', 500))
             )
         finally:
             conn.close()
@@ -240,7 +248,6 @@ class AppConfig:
     def save_to_db(self):
         conn = get_db_connection()
         try:
-            # 保存基础配置
             basic_config = {
                 'whisper_model': self.whisper_model,
                 'compute_type': self.compute_type,
@@ -248,10 +255,10 @@ class AppConfig:
                 'source_language': self.source_language,
                 'enable_translation': 'true' if self.enable_translation else 'false',
                 'target_language': self.target_language,
-                'current_provider': self.current_provider
+                'current_provider': self.current_provider,
+                'max_lines_per_batch': str(self.max_lines_per_batch)
             }
             
-            # 保存多提供商配置
             provider_configs_data = {
                 k: asdict(v) for k, v in self.provider_configs.items()
             }
@@ -269,7 +276,6 @@ class AppConfig:
     def get_current_provider_config(self) -> ProviderConfig:
         """获取当前提供商的配置"""
         if self.current_provider not in self.provider_configs:
-            # 如果没有配置，使用默认值
             default = LLM_PROVIDERS.get(self.current_provider, {})
             return ProviderConfig(
                 api_key='',
@@ -439,6 +445,9 @@ class MediaDAO:
         finally:
             conn.close()
 
+# ============================================================================
+# 辅助函数（保持原有功能）
+# ============================================================================
 def get_lang_name(code: str) -> str:
     return ISO_LANG_MAP.get(code.lower(), code)
 
@@ -558,121 +567,37 @@ def fetch_ollama_models(base_url_v1: str) -> List[str]:
     return []
 
 def test_api_connection(api_key: str, base_url: str, model: str) -> Tuple[bool, str]:
-    if "ollama" in base_url.lower() or "host.docker.internal" in base_url:
-        api_key = "ollama"
-    client = OpenAI(api_key=api_key, base_url=base_url)
+    """测试 API 连接（使用新的翻译模块）"""
     try:
-        client.chat.completions.create(model=model, messages=[{"role": "user", "content": "Hi"}], max_tokens=1, timeout=10)
+        config = TranslationConfig(
+            api_key=api_key,
+            base_url=base_url,
+            model_name=model,
+            target_language='zh'
+        )
+        translator = SubtitleTranslator(config)
+        # 简单测试：翻译一条假字幕
+        from translator import SubtitleEntry
+        test_entry = SubtitleEntry("1", "00:00:00,000 --> 00:00:01,000", "Hello")
+        translator._translate_batch([test_entry])
         return True, "连接成功"
     except Exception as e:
         return False, str(e)
 
-def parse_srt_content(content: str) -> List[Dict]:
-    blocks, result = content.strip().split('\n\n'), []
-    for block in blocks:
-        lines = block.strip().split('\n')
-        if len(lines) >= 3:
-            try:
-                result.append({'index': lines[0], 'timecode': lines[1], 'text': '\n'.join(lines[2:])})
-            except:
-                continue
-    return result
-
-def rebuild_srt(subs: List[Dict]) -> str:
-    lines = []
-    for sub in subs:
-        index = str(sub.get('index', '1')).strip()
-        timecode = str(sub.get('timecode', '00:00:00,000 --> 00:00:01,000')).strip()
-        text = str(sub.get('text', '')).strip()
-        if not text:
-            continue
-        lines.append(f"{index}\n{timecode}\n{text}\n")
-    return '\n'.join(lines)
-
-# 这是第二部分，接在第一部分后面
-
-def translate_subtitles(srt_path: str, config: AppConfig, task_id: int) -> bool:
-    try:
-        with open(srt_path, 'r', encoding='utf-8') as f:
-            content = f.read()
-        subs = parse_srt_content(content)
-        if not subs:
-            TaskDAO.update_task(task_id, log="字幕解析失败")
-            return False
-        
-        # 获取当前提供商配置
-        provider_cfg = config.get_current_provider_config()
-        api_key = provider_cfg.api_key
-        if "ollama" in provider_cfg.base_url.lower():
-            api_key = "ollama"
-        
-        client = OpenAI(api_key=api_key, base_url=provider_cfg.base_url)
-        target_name = get_lang_name(config.target_language)
-        trans_subs, total_batches = [], (len(subs) + BATCH_SIZE - 1) // BATCH_SIZE
-        
-        for i in range(0, len(subs), BATCH_SIZE):
-            batch, batch_num = subs[i:i+BATCH_SIZE], i // BATCH_SIZE + 1
-            TaskDAO.update_task(task_id, log=f"正在翻译第 {batch_num}/{total_batches} 批...")
-            
-            texts_to_translate = [sub['text'] for sub in batch]
-            texts_str = '\n---\n'.join(texts_to_translate)
-            
-            prompt = f"""You are a professional subtitle translator. Translate the following dialogue to {target_name}.
-
-Rules:
-1. Be faithful - do NOT expand or add content
-2. Keep translations concise and natural
-3. Each subtitle is separated by "---" - output EXACTLY {len(texts_to_translate)} translations
-4. Output translations ONLY, without any explanations or numbers
-
-Text to translate:
-{texts_str}"""
-            
-            try:
-                resp = client.chat.completions.create(
-                    model=provider_cfg.model_name,
-                    messages=[{"role": "user", "content": prompt}],
-                    temperature=0.3,
-                    timeout=180
-                )
-                
-                translated_texts = resp.choices[0].message.content.strip().split('---')
-                translated_texts = [t.strip() for t in translated_texts if t.strip()]
-                
-                if len(translated_texts) == len(batch):
-                    for orig_sub, trans_text in zip(batch, translated_texts):
-                        trans_subs.append({
-                            'index': orig_sub['index'],
-                            'timecode': orig_sub['timecode'],
-                            'text': trans_text
-                        })
-                else:
-                    trans_subs.extend(batch)
-                    TaskDAO.update_task(task_id, log=f"⚠️ 第 {batch_num} 批数量不匹配，保留原文")
-            except Exception as e:
-                print(f"Translation batch {batch_num} failed: {e}")
-                trans_subs.extend(batch)
-                TaskDAO.update_task(task_id, log=f"❌ 第 {batch_num} 批失败: {str(e)[:50]}")
-            
-            progress = 50 + int((batch_num / total_batches) * 45)
-            TaskDAO.update_task(task_id, progress=progress)
-        
-        out_path = Path(srt_path).parent / f"{Path(srt_path).stem}.{config.target_language}.srt"
-        with open(out_path, 'w', encoding='utf-8') as f:
-            f.write(rebuild_srt(trans_subs))
-        return True
-    except Exception as e:
-        print(f"Translation failed: {e}")
-        TaskDAO.update_task(task_id, log=f"翻译异常: {e}")
-        return False
-
+# ============================================================================
+# 核心处理函数（使用新的翻译模块）
+# ============================================================================
 def process_video_file(task_id: int, file_path: str, config: AppConfig):
+    """处理视频文件（Whisper 提取 + 翻译）"""
     try:
         TaskDAO.update_task(task_id, status='processing', progress=0, log="任务启动")
         if not os.path.exists(file_path):
             TaskDAO.update_task(task_id, status='failed', log="文件丢失")
             return
+        
         srt_path = Path(file_path).with_suffix('.srt')
+        
+        # 步骤 1: Whisper 提取字幕
         if srt_path.exists():
             TaskDAO.update_task(task_id, progress=50, log="基础字幕已存在")
         else:
@@ -682,9 +607,9 @@ def process_video_file(task_id: int, file_path: str, config: AppConfig):
             except Exception as e:
                 TaskDAO.update_task(task_id, status='failed', log=f"模型加载失败: {e}")
                 return
+            
             TaskDAO.update_task(task_id, progress=10, log="正在提取...")
             
-            # faster-whisper 支持的参数
             params = {
                 'audio': file_path,
                 'beam_size': 5,
@@ -716,16 +641,41 @@ def process_video_file(task_id: int, file_path: str, config: AppConfig):
                 TaskDAO.update_task(task_id, status='failed', log=f"提取失败: {e}")
                 return
         
+        # 步骤 2: 翻译字幕（使用新模块）
         if config.enable_translation:
             TaskDAO.update_task(task_id, progress=50, log="准备翻译...")
-            success = translate_subtitles(str(srt_path), config, task_id)
+            
+            # 创建翻译配置
+            provider_cfg = config.get_current_provider_config()
+            trans_config = TranslationConfig(
+                api_key=provider_cfg.api_key,
+                base_url=provider_cfg.base_url,
+                model_name=provider_cfg.model_name,
+                target_language=config.target_language,
+                source_language=config.source_language,
+                max_lines_per_batch=config.max_lines_per_batch
+            )
+            
+            # 进度回调
+            def progress_callback(current, total, message):
+                progress = 50 + int((current / total) * 45)
+                TaskDAO.update_task(task_id, progress=progress, log=message)
+            
+            # 执行翻译
+            success, msg = translate_srt_file(
+                str(srt_path),
+                trans_config,
+                progress_callback=progress_callback
+            )
+            
             if success:
                 TaskDAO.update_task(task_id, status='completed', progress=100, log="完成")
             else:
-                TaskDAO.update_task(task_id, status='failed', progress=100, log="翻译失败")
+                TaskDAO.update_task(task_id, status='failed', progress=100, log=f"翻译失败: {msg}")
         else:
             TaskDAO.update_task(task_id, status='completed', progress=100, log="完成")
         
+        # 更新媒体库
         subs_json = scan_file_subtitles(Path(file_path))
         has_translated = ".zh.srt" in subs_json or ".chs.srt" in subs_json
         MediaDAO.update_media_subtitles(file_path, subs_json, has_translated)
@@ -734,6 +684,7 @@ def process_video_file(task_id: int, file_path: str, config: AppConfig):
         TaskDAO.update_task(task_id, status='failed', log=f"异常: {e}")
 
 def worker_thread():
+    """后台工作线程"""
     max_retries = 30
     for i in range(max_retries):
         try:
@@ -762,7 +713,11 @@ def worker_thread():
             print(f"Worker error: {e}")
             time.sleep(10)
 
+# ============================================================================
+# UI 渲染函数
+# ============================================================================
 def render_config_sidebar():
+    """渲染配置侧边栏"""
     with st.sidebar:
         st.caption("参数配置")
         debug_mode = st.toggle("调试日志", value=False)
@@ -779,12 +734,20 @@ def render_config_sidebar():
             enable_translation = st.checkbox("启用翻译", value=config.enable_translation)
             target_lang = st.selectbox("目标语言", TARGET_LANG_OPTIONS, format_func=lambda x: ISO_LANG_MAP.get(x, x), index=TARGET_LANG_OPTIONS.index(config.target_language))
             
+            # 新增：分批大小配置
+            max_lines = st.number_input(
+                "每批最多翻译行数", 
+                min_value=100, 
+                max_value=2000, 
+                value=config.max_lines_per_batch,
+                step=100,
+                help="短视频会一次性翻译，长视频会按此数量分批"
+            )
+            
             provider = st.selectbox("AI 提供商", list(LLM_PROVIDERS.keys()), index=list(LLM_PROVIDERS.keys()).index(config.current_provider) if config.current_provider in LLM_PROVIDERS else 0)
             
-            # 获取该提供商的配置（如果有）
             provider_cfg = config.provider_configs.get(provider)
             if not provider_cfg:
-                # 如果没有保存过，使用默认值
                 default = LLM_PROVIDERS[provider]
                 provider_cfg = ProviderConfig(api_key='', base_url=default.get('base_url', ''), model_name=default.get('model', ''))
             
@@ -822,13 +785,13 @@ def render_config_sidebar():
             
             with col_t2:
                 if st.button("保存", type="primary", use_container_width=True):
-                    # 保存当前提供商的配置
                     config.whisper_model = model_size
                     config.compute_type = compute_type
                     config.device = device
                     config.source_language = source_language
                     config.enable_translation = enable_translation
                     config.target_language = target_lang
+                    config.max_lines_per_batch = max_lines
                     config.update_provider_config(provider, api_key, base_url, model_name)
                     config.save_to_db()
                     st.toast(f"✅ 已保存 {provider} 的配置")
@@ -836,7 +799,7 @@ def render_config_sidebar():
     return debug_mode
 
 def render_media_library(debug_mode: bool):
-    """渲染媒体库页面 - 修复全选状态同步问题"""
+    """渲染媒体库页面"""
     col_filter, col_refresh, col_start = st.columns([2, 2, 2])
     
     with col_filter:
@@ -850,10 +813,8 @@ def render_media_library(debug_mode: bool):
                 cnt, logs = scan_media_directory(debug=debug_mode)
                 st.toast(f"更新 {cnt} 个文件")
     
-    # 获取文件列表
     files = MediaDAO.get_media_files(filter_map[filter_type])
     
-    # *** 修复 1：先计算选中数量（在渲染按钮之前）***
     selected_count = sum(1 for f in files if st.session_state.get(f"s_{f['id']}", False))
     
     with col_start:
@@ -882,28 +843,20 @@ def render_media_library(debug_mode: bool):
         st.info("🔭 暂无文件")
         return
     
-    # *** 修复 2：全选 checkbox 状态变化时立即 rerun ***
     current_select_all = st.checkbox("全选", key="select_all_box")
     last_select_all = st.session_state.get("_last_select_all", False)
     
-    # 检测状态是否改变
     if current_select_all != last_select_all:
         if current_select_all:
-            # 全选：设置所有文件为选中
             for f in files:
                 st.session_state[f"s_{f['id']}"] = True
         else:
-            # 取消全选：设置所有文件为未选中
             for f in files:
                 st.session_state[f"s_{f['id']}"] = False
         
-        # 保存当前状态
         st.session_state["_last_select_all"] = current_select_all
-        
-        # *** 关键：立即触发 rerun 以更新按钮 ***
         st.rerun()
     
-    # 渲染文件列表
     for f in files:
         subs, badges = f['subtitles'], ""
         if not subs:
@@ -925,6 +878,7 @@ def render_media_library(debug_mode: bool):
             st.markdown(f"""<div class="hero-card"><div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;"><div style="font-weight:600; font-size:15px; color:#f4f4f5; overflow:hidden; white-space:nowrap; text-overflow:ellipsis;">{f['file_name']}</div><div style="font-size:12px; color:#71717a; min-width:60px; text-align:right;">{format_file_size(f['file_size'])}</div></div><div style="font-size:12px; color:#52525b; margin-bottom:12px; font-family:monospace;">{f['file_path']}</div><div>{badges}</div></div>""", unsafe_allow_html=True)
 
 def render_task_queue():
+    """渲染任务队列页面"""
     col_space, col_clear = st.columns([8, 2])
     with col_clear:
         if st.button("清理记录", use_container_width=True):
@@ -936,7 +890,6 @@ def render_task_queue():
         st.info("🔭 队列为空")
         return
     
-    # *** 关键修改：检查是否有处理中的任务 ***
     has_processing = any(t['status'] == 'processing' for t in tasks)
     
     for t in tasks:
@@ -965,7 +918,6 @@ def render_task_queue():
                     TaskDAO.delete_task(t['id'])
                     st.rerun()
     
-    # *** 关键修改：只在有处理中任务时才自动刷新 ***
     if has_processing:
         time.sleep(3)
         st.rerun()
