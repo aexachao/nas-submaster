@@ -31,7 +31,6 @@
 ## 📸 界面预览
 
 ![Dashboard](docs/images/dashboard.png)
-*(请确保 docs/images/dashboard.png 存在，或替换为实际截图链接)*
 
 ---
 
