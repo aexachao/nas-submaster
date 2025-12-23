@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-NAS 字幕管家 (重构版) V7.0.0
+NAS 字幕管家 (重构版) V7.0.1
 主要改进：
 1. 翻译模块独立化（translator.py）
 2. 使用 JSON 格式强制结构化输出
@@ -26,14 +26,19 @@ import pandas as pd
 from faster_whisper import WhisperModel
 import logging
 
-# 导入新的翻译模块
-from translator import (
-    SubtitleTranslator,
-    TranslationConfig,
-    parse_srt_file,
-    save_srt_file,
-    translate_srt_file
-)
+# 导入新的翻译模块（延迟导入，避免循环依赖）
+try:
+    from translator import (
+        SubtitleTranslator,
+        TranslationConfig,
+        parse_srt_file,
+        save_srt_file,
+        translate_srt_file
+    )
+    HAS_TRANSLATOR = True
+except ImportError as e:
+    print(f"[警告] 翻译模块未找到: {e}")
+    HAS_TRANSLATOR = False
 
 # 抑制 Tornado WebSocket 关闭警告
 logging.getLogger('tornado.application').setLevel(logging.ERROR)
@@ -209,11 +214,116 @@ class AppConfig:
     target_language: str = 'zh'
     current_provider: str = 'Ollama (本地模型)'
     provider_configs: Dict[str, ProviderConfig] = None
-    max_lines_per_batch: int = 500  # 新增：每批最多翻译行数
+    max_lines_per_batch: int = 500  # 每批最多翻译行数
+    content_type: str = 'movie'  # 新增：内容类型（影响 VAD 参数）
+    export_formats: List[str] = None 
     
     def __post_init__(self):
         if self.provider_configs is None:
             self.provider_configs = {}
+        # 👇👇👇 建议也加上这一行，防止为 None 👇👇👇
+        if self.export_formats is None:
+            self.export_formats = ['srt']
+    
+    def __post_init__(self):
+        if self.provider_configs is None:
+            self.provider_configs = {}
+    
+    def get_vad_parameters(self) -> dict:
+        """根据内容类型返回 VAD 参数"""
+        vad_presets = {
+            'movie': {
+                'name': '电影/剧集（标准）',
+                'threshold': 0.5,
+                'min_speech_duration_ms': 250,
+                'min_silence_duration_ms': 2000,
+                'speech_pad_ms': 400,
+                'description': '适合有明确对话的影视内容，时间轴精准'
+            },
+            'documentary': {
+                'name': '纪录片/新闻',
+                'threshold': 0.45,
+                'min_speech_duration_ms': 300,
+                'min_silence_duration_ms': 1800,
+                'speech_pad_ms': 500,
+                'description': '适合旁白较多的内容，减少背景音干扰'
+            },
+            'variety': {
+                'name': '综艺/访谈',
+                'threshold': 0.6,
+                'min_speech_duration_ms': 200,
+                'min_silence_duration_ms': 2500,
+                'speech_pad_ms': 300,
+                'description': '过滤笑声/掌声等噪音，适合多人对话'
+            },
+            'animation': {
+                'name': '动画/动漫',
+                'threshold': 0.4,
+                'min_speech_duration_ms': 150,
+                'min_silence_duration_ms': 1500,
+                'speech_pad_ms': 350,
+                'description': '适合语速较快的动画内容'
+            },
+            'lecture': {
+                'name': '讲座/课程',
+                'threshold': 0.5,
+                'min_speech_duration_ms': 400,
+                'min_silence_duration_ms': 2500,
+                'speech_pad_ms': 600,
+                'description': '适合单人演讲，注重完整语句'
+            },
+            'music': {
+                'name': '音乐视频/MV',
+                'threshold': 0.7,
+                'min_speech_duration_ms': 500,
+                'min_silence_duration_ms': 3000,
+                'speech_pad_ms': 200,
+                'description': '高阈值过滤背景音乐，仅提取歌词/对话'
+            },
+            'custom': {
+                'name': '自定义',
+                'threshold': 0.5,
+                'min_speech_duration_ms': 250,
+                'min_silence_duration_ms': 2000,
+                'speech_pad_ms': 400,
+                'description': '默认配置，可在高级选项中调整'
+            }
+        }
+        
+        preset = vad_presets.get(self.content_type, vad_presets['movie'])
+        return {
+            'threshold': preset['threshold'],
+            'min_speech_duration_ms': preset['min_speech_duration_ms'],
+            'min_silence_duration_ms': preset['min_silence_duration_ms'],
+            'speech_pad_ms': preset['speech_pad_ms'],
+        }
+    
+    @staticmethod
+    def get_content_type_options() -> Dict[str, str]:
+        """获取内容类型选项（key: 内部名称, value: 显示名称）"""
+        return {
+            'movie': '🎬 电影/剧集（标准）',
+            'documentary': '📺 纪录片/新闻',
+            'variety': '🎤 综艺/访谈',
+            'animation': '🎨 动画/动漫',
+            'lecture': '🎓 讲座/课程',
+            'music': '🎵 音乐视频/MV',
+            'custom': '⚙️ 自定义'
+        }
+    
+    @staticmethod
+    def get_content_type_description(content_type: str) -> str:
+        """获取内容类型的详细说明"""
+        descriptions = {
+            'movie': '标准配置，适合电影、电视剧等有明确对话的影视内容。时间轴精准度高。',
+            'documentary': '优化旁白识别，减少背景音乐干扰。适合纪录片、新闻、访谈节目。',
+            'variety': '高阈值过滤笑声、掌声、背景音。适合综艺节目、脱口秀、多人访谈。',
+            'animation': '适配较快语速，减少停顿。适合日本动漫、卡通片等快节奏内容。',
+            'lecture': '注重完整语句识别，增加停顿缓冲。适合教学视频、演讲、培训课程。',
+            'music': '极高阈值仅提取人声，忽略背景音乐。适合 MV、音乐会、歌唱节目。',
+            'custom': '默认配置，也可以手动调整 VAD 参数以满足特殊需求。'
+        }
+        return descriptions.get(content_type, '')
     
     @classmethod
     def load_from_db(cls) -> 'AppConfig':
@@ -231,6 +341,13 @@ class AppConfig:
             except:
                 provider_configs = {}
             
+            # 加载导出格式
+            export_formats_json = config_dict.get('export_formats', '["srt"]')
+            try:
+                export_formats = json.loads(export_formats_json)
+            except:
+                export_formats = ['srt']
+            
             return cls(
                 whisper_model=config_dict.get('whisper_model', 'base'),
                 compute_type=config_dict.get('compute_type', 'int8'),
@@ -240,7 +357,9 @@ class AppConfig:
                 target_language=config_dict.get('target_language', 'zh'),
                 current_provider=config_dict.get('current_provider', 'Ollama (本地模型)'),
                 provider_configs=provider_configs,
-                max_lines_per_batch=int(config_dict.get('max_lines_per_batch', 500))
+                max_lines_per_batch=int(config_dict.get('max_lines_per_batch', 500)),
+                content_type=config_dict.get('content_type', 'movie'),
+                export_formats=export_formats
             )
         finally:
             conn.close()
@@ -256,7 +375,9 @@ class AppConfig:
                 'enable_translation': 'true' if self.enable_translation else 'false',
                 'target_language': self.target_language,
                 'current_provider': self.current_provider,
-                'max_lines_per_batch': str(self.max_lines_per_batch)
+                'max_lines_per_batch': str(self.max_lines_per_batch),
+                'content_type': self.content_type,
+                'export_formats': json.dumps(self.export_formats)
             }
             
             provider_configs_data = {
@@ -567,7 +688,25 @@ def fetch_ollama_models(base_url_v1: str) -> List[str]:
     return []
 
 def test_api_connection(api_key: str, base_url: str, model: str) -> Tuple[bool, str]:
-    """测试 API 连接（使用新的翻译模块）"""
+    """测试 API 连接（兼容新旧版本）"""
+    if not HAS_TRANSLATOR:
+        # 降级到旧版测试方法
+        from openai import OpenAI
+        try:
+            if "ollama" in base_url.lower() or "host.docker.internal" in base_url:
+                api_key = "ollama"
+            client = OpenAI(api_key=api_key, base_url=base_url)
+            client.chat.completions.create(
+                model=model, 
+                messages=[{"role": "user", "content": "Hi"}], 
+                max_tokens=1, 
+                timeout=10
+            )
+            return True, "连接成功"
+        except Exception as e:
+            return False, str(e)
+    
+    # 新版测试方法
     try:
         config = TranslationConfig(
             api_key=api_key,
@@ -641,37 +780,41 @@ def process_video_file(task_id: int, file_path: str, config: AppConfig):
                 TaskDAO.update_task(task_id, status='failed', log=f"提取失败: {e}")
                 return
         
-        # 步骤 2: 翻译字幕（使用新模块）
+        # 步骤 2: 翻译字幕（使用新模块或降级到旧版）
         if config.enable_translation:
             TaskDAO.update_task(task_id, progress=50, log="准备翻译...")
             
-            # 创建翻译配置
-            provider_cfg = config.get_current_provider_config()
-            trans_config = TranslationConfig(
-                api_key=provider_cfg.api_key,
-                base_url=provider_cfg.base_url,
-                model_name=provider_cfg.model_name,
-                target_language=config.target_language,
-                source_language=config.source_language,
-                max_lines_per_batch=config.max_lines_per_batch
-            )
-            
-            # 进度回调
-            def progress_callback(current, total, message):
-                progress = 50 + int((current / total) * 45)
-                TaskDAO.update_task(task_id, progress=progress, log=message)
-            
-            # 执行翻译
-            success, msg = translate_srt_file(
-                str(srt_path),
-                trans_config,
-                progress_callback=progress_callback
-            )
-            
-            if success:
-                TaskDAO.update_task(task_id, status='completed', progress=100, log="完成")
+            if HAS_TRANSLATOR:
+                # 新版翻译模块
+                provider_cfg = config.get_current_provider_config()
+                trans_config = TranslationConfig(
+                    api_key=provider_cfg.api_key,
+                    base_url=provider_cfg.base_url,
+                    model_name=provider_cfg.model_name,
+                    target_language=config.target_language,
+                    source_language=config.source_language,
+                    max_lines_per_batch=config.max_lines_per_batch
+                )
+                
+                # 进度回调
+                def progress_callback(current, total, message):
+                    progress = 50 + int((current / total) * 45)
+                    TaskDAO.update_task(task_id, progress=progress, log=message)
+                
+                # 执行翻译
+                success, msg = translate_srt_file(
+                    str(srt_path),
+                    trans_config,
+                    progress_callback=progress_callback
+                )
+                
+                if success:
+                    TaskDAO.update_task(task_id, status='completed', progress=100, log="完成")
+                else:
+                    TaskDAO.update_task(task_id, status='failed', progress=100, log=f"翻译失败: {msg}")
             else:
-                TaskDAO.update_task(task_id, status='failed', progress=100, log=f"翻译失败: {msg}")
+                # 降级到旧版翻译（保持兼容性）
+                TaskDAO.update_task(task_id, status='failed', progress=100, log="翻译模块未安装，请检查 translator.py")
         else:
             TaskDAO.update_task(task_id, status='completed', progress=100, log="完成")
         
@@ -679,6 +822,33 @@ def process_video_file(task_id: int, file_path: str, config: AppConfig):
         subs_json = scan_file_subtitles(Path(file_path))
         has_translated = ".zh.srt" in subs_json or ".chs.srt" in subs_json
         MediaDAO.update_media_subtitles(file_path, subs_json, has_translated)
+        
+        # 导出多格式字幕（如果配置了）
+        try:
+            from subtitle_converter import SubtitleConverter
+            
+            exported_formats = []
+            for fmt in config.export_formats:
+                if fmt == 'srt':
+                    continue  # SRT 已经生成
+                
+                try:
+                    # 转换原始字幕
+                    SubtitleConverter.convert_file(str(srt_path), fmt)
+                    exported_formats.append(fmt.upper())
+                    
+                    # 如果有翻译版本，也转换
+                    if config.enable_translation:
+                        trans_srt_path = Path(file_path).parent / f"{Path(file_path).stem}.{config.target_language}.srt"
+                        if trans_srt_path.exists():
+                            SubtitleConverter.convert_file(str(trans_srt_path), fmt)
+                except Exception as e:
+                    print(f"Failed to export {fmt} format: {e}")
+            
+            if exported_formats:
+                TaskDAO.update_task(task_id, log=f"完成（已导出: {', '.join(exported_formats)}）")
+        except ImportError:
+            pass  # 如果没有转换器模块，跳过
     except Exception as e:
         print(f"Task {task_id} failed: {e}")
         TaskDAO.update_task(task_id, status='failed', log=f"异常: {e}")
@@ -724,11 +894,80 @@ def render_config_sidebar():
         config = AppConfig.load_from_db()
         
         with st.expander("Whisper 设置", expanded=False):
+            # 内容类型选择（新增）
+            content_type_options = config.get_content_type_options()
+            content_type_keys = list(content_type_options.keys())
+            content_type_values = list(content_type_options.values())
+            
+            current_index = content_type_keys.index(config.content_type) if config.content_type in content_type_keys else 0
+            
+            content_type = st.selectbox(
+                "内容类型",
+                content_type_keys,
+                format_func=lambda x: content_type_options[x],
+                index=current_index,
+                help="选择内容类型以自动优化 VAD 参数"
+            )
+            
+            # 显示当前选择的说明
+            if content_type:
+                st.caption(f"💡 {config.get_content_type_description(content_type)}")
+            
+            # 显示当前 VAD 参数（只读）
+            temp_config = AppConfig(content_type=content_type)
+            vad = temp_config.get_vad_parameters()
+            with st.expander("📊 当前 VAD 参数（自动）", expanded=False):
+                st.caption(f"阈值: {vad['threshold']}")
+                st.caption(f"最小语音时长: {vad['min_speech_duration_ms']}ms")
+                st.caption(f"最小静音时长: {vad['min_silence_duration_ms']}ms")
+                st.caption(f"语音填充: {vad['speech_pad_ms']}ms")
+            
+            st.divider()
+            
             model_size = st.selectbox("模型大小", ["tiny", "base", "small", "medium", "large-v3"], index=["tiny", "base", "small", "medium", "large-v3"].index(config.whisper_model))
             compute_type = st.selectbox("计算类型", ["int8", "float16"], index=["int8", "float16"].index(config.compute_type))
             device = st.selectbox("设备", ["cpu", "cuda"], index=["cpu", "cuda"].index(config.device))
             s_keys = list(ISO_LANG_MAP.keys())
             source_language = st.selectbox("视频原声", s_keys, format_func=lambda x: ISO_LANG_MAP[x], index=s_keys.index(config.source_language))
+            
+            st.divider()
+            
+            # 导出格式选择
+            st.caption("🎬 导出格式")
+            format_options = {
+                'srt': 'SRT - 最通用（默认）',
+                'vtt': 'VTT - Web 视频',
+                'ass': 'ASS - 样式丰富',
+                'ssa': 'SSA - 兼容性好',
+                'sub': 'SUB - 老式播放器'
+            }
+            
+            # 使用多选框
+            selected_formats = []
+            col1, col2 = st.columns(2)
+            with col1:
+                if st.checkbox('SRT', value='srt' in config.export_formats, key='fmt_srt'):
+                    selected_formats.append('srt')
+                if st.checkbox('VTT', value='vtt' in config.export_formats, key='fmt_vtt'):
+                    selected_formats.append('vtt')
+                if st.checkbox('ASS', value='ass' in config.export_formats, key='fmt_ass'):
+                    selected_formats.append('ass')
+            with col2:
+                if st.checkbox('SSA', value='ssa' in config.export_formats, key='fmt_ssa'):
+                    selected_formats.append('ssa')
+                if st.checkbox('SUB', value='sub' in config.export_formats, key='fmt_sub'):
+                    selected_formats.append('sub')
+            
+            if not selected_formats:
+                st.warning("⚠️ 至少选择一种格式")
+                selected_formats = ['srt']
+            
+            with st.expander("ℹ️ 格式说明", expanded=False):
+                st.caption("**SRT**: 最通用，几乎所有播放器支持")
+                st.caption("**VTT**: Web/HTML5 播放器专用")
+                st.caption("**ASS**: 支持丰富样式，动漫字幕常用")
+                st.caption("**SSA**: ASS 的前身，兼容性更好")
+                st.caption("**SUB**: 老式 DVD 播放器支持")
         
         with st.expander("翻译设置", expanded=True):
             enable_translation = st.checkbox("启用翻译", value=config.enable_translation)
@@ -792,9 +1031,13 @@ def render_config_sidebar():
                     config.enable_translation = enable_translation
                     config.target_language = target_lang
                     config.max_lines_per_batch = max_lines
+                    config.content_type = content_type
+                    config.export_formats = selected_formats  # 保存导出格式
                     config.update_provider_config(provider, api_key, base_url, model_name)
                     config.save_to_db()
-                    st.toast(f"✅ 已保存 {provider} 的配置")
+                    
+                    formats_str = ', '.join([f.upper() for f in selected_formats])
+                    st.toast(f"✅ 已保存配置（导出: {formats_str}）")
     
     return debug_mode
 

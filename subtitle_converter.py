@@ -1,0 +1,453 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+字幕格式转换器
+支持多种字幕格式：SRT, ASS, VTT, SSA, SUB
+"""
+
+import re
+from pathlib import Path
+from typing import List, Dict, Optional
+from dataclasses import dataclass
+from datetime import timedelta
+
+
+@dataclass
+class SubtitleEntry:
+    """通用字幕条目"""
+    index: int
+    start_ms: int  # 开始时间（毫秒）
+    end_ms: int    # 结束时间（毫秒）
+    text: str
+    
+    def duration_ms(self) -> int:
+        """获取持续时间（毫秒）"""
+        return self.end_ms - self.start_ms
+
+
+class SubtitleConverter:
+    """字幕格式转换器"""
+    
+    @staticmethod
+    def parse_srt_time(time_str: str) -> int:
+        """
+        解析 SRT 时间格式为毫秒
+        格式: HH:MM:SS,mmm
+        """
+        match = re.match(r'(\d{2}):(\d{2}):(\d{2}),(\d{3})', time_str)
+        if not match:
+            raise ValueError(f"无效的 SRT 时间格式: {time_str}")
+        
+        hours, minutes, seconds, milliseconds = map(int, match.groups())
+        return (hours * 3600 + minutes * 60 + seconds) * 1000 + milliseconds
+    
+    @staticmethod
+    def format_srt_time(ms: int) -> str:
+        """
+        将毫秒格式化为 SRT 时间
+        格式: HH:MM:SS,mmm
+        """
+        if ms < 0:
+            ms = 0
+        
+        hours = ms // 3600000
+        ms %= 3600000
+        minutes = ms // 60000
+        ms %= 60000
+        seconds = ms // 1000
+        milliseconds = ms % 1000
+        
+        return f"{hours:02d}:{minutes:02d}:{seconds:02d},{milliseconds:03d}"
+    
+    @staticmethod
+    def format_vtt_time(ms: int) -> str:
+        """
+        将毫秒格式化为 VTT 时间
+        格式: HH:MM:SS.mmm
+        """
+        srt_time = SubtitleConverter.format_srt_time(ms)
+        return srt_time.replace(',', '.')
+    
+    @staticmethod
+    def format_ass_time(ms: int) -> str:
+        """
+        将毫秒格式化为 ASS/SSA 时间
+        格式: H:MM:SS.cc (centiseconds)
+        """
+        if ms < 0:
+            ms = 0
+        
+        hours = ms // 3600000
+        ms %= 3600000
+        minutes = ms // 60000
+        ms %= 60000
+        seconds = ms // 1000
+        centiseconds = (ms % 1000) // 10
+        
+        return f"{hours}:{minutes:02d}:{seconds:02d}.{centiseconds:02d}"
+    
+    @staticmethod
+    def parse_srt(content: str) -> List[SubtitleEntry]:
+        """解析 SRT 格式"""
+        entries = []
+        blocks = content.strip().split('\n\n')
+        
+        for block in blocks:
+            lines = block.strip().split('\n')
+            if len(lines) < 3:
+                continue
+            
+            try:
+                index = int(lines[0].strip())
+                timecode = lines[1].strip()
+                text = '\n'.join(lines[2:]).strip()
+                
+                # 解析时间轴
+                match = re.match(r'([\d:,]+)\s*-->\s*([\d:,]+)', timecode)
+                if not match:
+                    continue
+                
+                start_ms = SubtitleConverter.parse_srt_time(match.group(1))
+                end_ms = SubtitleConverter.parse_srt_time(match.group(2))
+                
+                entries.append(SubtitleEntry(
+                    index=index,
+                    start_ms=start_ms,
+                    end_ms=end_ms,
+                    text=text
+                ))
+            except (ValueError, IndexError):
+                continue
+        
+        return entries
+    
+    @staticmethod
+    def to_srt(entries: List[SubtitleEntry]) -> str:
+        """
+        转换为 SRT 格式
+        
+        格式示例:
+        1
+        00:00:01,000 --> 00:00:03,000
+        Hello, world!
+        """
+        lines = []
+        for entry in entries:
+            start = SubtitleConverter.format_srt_time(entry.start_ms)
+            end = SubtitleConverter.format_srt_time(entry.end_ms)
+            
+            lines.append(f"{entry.index}")
+            lines.append(f"{start} --> {end}")
+            lines.append(entry.text)
+            lines.append("")  # 空行分隔
+        
+        return '\n'.join(lines)
+    
+    @staticmethod
+    def to_vtt(entries: List[SubtitleEntry]) -> str:
+        """
+        转换为 WebVTT 格式
+        
+        格式示例:
+        WEBVTT
+        
+        1
+        00:00:01.000 --> 00:00:03.000
+        Hello, world!
+        """
+        lines = ["WEBVTT", ""]
+        
+        for entry in entries:
+            start = SubtitleConverter.format_vtt_time(entry.start_ms)
+            end = SubtitleConverter.format_vtt_time(entry.end_ms)
+            
+            lines.append(f"{entry.index}")
+            lines.append(f"{start} --> {end}")
+            lines.append(entry.text)
+            lines.append("")
+        
+        return '\n'.join(lines)
+    
+    @staticmethod
+    def to_ass(entries: List[SubtitleEntry], 
+               style_name: str = "Default",
+               font_name: str = "Arial",
+               font_size: int = 20) -> str:
+        """
+        转换为 ASS (Advanced SubStation Alpha) 格式
+        
+        ASS 支持丰富的样式和特效，兼容性好
+        """
+        # ASS 文件头
+        header = f"""[Script Info]
+; Script generated by NAS Subtitle Manager
+Title: Subtitles
+ScriptType: v4.00+
+WrapStyle: 0
+ScaledBorderAndShadow: yes
+YCbCr Matrix: TV.601
+PlayResX: 1920
+PlayResY: 1080
+
+[V4+ Styles]
+Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
+Style: {style_name},{font_name},{font_size},&H00FFFFFF,&H000000FF,&H00000000,&H80000000,0,0,0,0,100,100,0,0,1,2,1,2,10,10,10,1
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+"""
+        
+        lines = [header]
+        
+        for entry in entries:
+            start = SubtitleConverter.format_ass_time(entry.start_ms)
+            end = SubtitleConverter.format_ass_time(entry.end_ms)
+            
+            # 处理换行（ASS 使用 \N）
+            text = entry.text.replace('\n', '\\N')
+            
+            lines.append(f"Dialogue: 0,{start},{end},{style_name},,0,0,0,,{text}")
+        
+        return '\n'.join(lines)
+    
+    @staticmethod
+    def to_ssa(entries: List[SubtitleEntry],
+               style_name: str = "Default",
+               font_name: str = "Arial",
+               font_size: int = 20) -> str:
+        """
+        转换为 SSA (SubStation Alpha) 格式
+        
+        SSA 是 ASS 的前身，兼容性更好但功能较少
+        """
+        # SSA 文件头
+        header = f"""[Script Info]
+; Script generated by NAS Subtitle Manager
+Title: Subtitles
+ScriptType: v4.00
+Collisions: Normal
+PlayResX: 1920
+PlayResY: 1080
+Timer: 100.0000
+
+[V4 Styles]
+Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, TertiaryColour, BackColour, Bold, Italic, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, AlphaLevel, Encoding
+Style: {style_name},{font_name},{font_size},16777215,65535,65535,-2147483640,0,0,1,2,1,2,10,10,10,0,1
+
+[Events]
+Format: Marked, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+"""
+        
+        lines = [header]
+        
+        for entry in entries:
+            start = SubtitleConverter.format_ass_time(entry.start_ms)
+            end = SubtitleConverter.format_ass_time(entry.end_ms)
+            
+            # 处理换行（SSA 也使用 \N）
+            text = entry.text.replace('\n', '\\N')
+            
+            lines.append(f"Dialogue: Marked=0,{start},{end},{style_name},,0,0,0,,{text}")
+        
+        return '\n'.join(lines)
+    
+    @staticmethod
+    def to_sub(entries: List[SubtitleEntry]) -> str:
+        """
+        转换为 SUB (MicroDVD) 格式
+        
+        格式示例:
+        {100}{200}Hello, world!
+        
+        注意: SUB 使用帧数而非时间，这里假设 25fps
+        """
+        fps = 25  # 假设 25 帧每秒
+        lines = []
+        
+        for entry in entries:
+            start_frame = int(entry.start_ms * fps / 1000)
+            end_frame = int(entry.end_ms * fps / 1000)
+            
+            # 处理换行（SUB 使用 |）
+            text = entry.text.replace('\n', '|')
+            
+            lines.append(f"{{{start_frame}}}{{{end_frame}}}{text}")
+        
+        return '\n'.join(lines)
+    
+    @staticmethod
+    def convert_file(input_path: str, 
+                    output_format: str,
+                    output_path: Optional[str] = None) -> str:
+        """
+        转换字幕文件格式
+        
+        Args:
+            input_path: 输入文件路径（通常是 .srt）
+            output_format: 目标格式 (srt, vtt, ass, ssa, sub)
+            output_path: 输出文件路径（可选，默认自动生成）
+        
+        Returns:
+            输出文件路径
+        """
+        # 读取输入文件
+        with open(input_path, 'r', encoding='utf-8', errors='ignore') as f:
+            content = f.read()
+        
+        # 解析为通用格式
+        entries = SubtitleConverter.parse_srt(content)
+        
+        if not entries:
+            raise ValueError("无法解析字幕文件或文件为空")
+        
+        # 转换为目标格式
+        output_format = output_format.lower()
+        if output_format == 'srt':
+            output_content = SubtitleConverter.to_srt(entries)
+        elif output_format == 'vtt':
+            output_content = SubtitleConverter.to_vtt(entries)
+        elif output_format == 'ass':
+            output_content = SubtitleConverter.to_ass(entries)
+        elif output_format == 'ssa':
+            output_content = SubtitleConverter.to_ssa(entries)
+        elif output_format == 'sub':
+            output_content = SubtitleConverter.to_sub(entries)
+        else:
+            raise ValueError(f"不支持的格式: {output_format}")
+        
+        # 生成输出路径
+        if output_path is None:
+            input_file = Path(input_path)
+            output_path = str(input_file.parent / f"{input_file.stem}.{output_format}")
+        
+        # 写入输出文件
+        with open(output_path, 'w', encoding='utf-8') as f:
+            f.write(output_content)
+        
+        return output_path
+    
+    @staticmethod
+    def convert_to_all_formats(input_path: str) -> Dict[str, str]:
+        """
+        将字幕转换为所有支持的格式
+        
+        Args:
+            input_path: 输入 SRT 文件路径
+        
+        Returns:
+            格式 -> 输出路径的字典
+        """
+        formats = ['srt', 'vtt', 'ass', 'ssa', 'sub']
+        results = {}
+        
+        for fmt in formats:
+            try:
+                output_path = SubtitleConverter.convert_file(input_path, fmt)
+                results[fmt] = output_path
+            except Exception as e:
+                print(f"转换为 {fmt} 格式失败: {e}")
+        
+        return results
+
+
+# ============================================================================
+# CLI 工具
+# ============================================================================
+def main():
+    """命令行工具"""
+    import sys
+    
+    if len(sys.argv) < 2:
+        print("""
+字幕格式转换器
+
+用法:
+  python subtitle_converter.py convert <input.srt> <format>     # 转换为指定格式
+  python subtitle_converter.py convert-all <input.srt>          # 转换为所有格式
+  python subtitle_converter.py formats                          # 显示支持的格式
+
+支持的格式:
+  - srt  : SubRip (最通用)
+  - vtt  : WebVTT (Web 播放器)
+  - ass  : Advanced SubStation Alpha (样式丰富)
+  - ssa  : SubStation Alpha (兼容性好)
+  - sub  : MicroDVD (老式播放器)
+
+示例:
+  python subtitle_converter.py convert movie.srt vtt
+  python subtitle_converter.py convert movie.zh.srt ass
+  python subtitle_converter.py convert-all movie.srt
+        """)
+        sys.exit(1)
+    
+    command = sys.argv[1]
+    
+    if command == 'formats':
+        print("\n支持的字幕格式：\n")
+        print("1. SRT  - SubRip")
+        print("   - 最通用的格式")
+        print("   - 几乎所有播放器支持")
+        print("   - 推荐用于大部分场景")
+        print()
+        print("2. VTT  - WebVTT")
+        print("   - Web 视频标准格式")
+        print("   - HTML5 播放器专用")
+        print("   - 适合在线视频平台")
+        print()
+        print("3. ASS  - Advanced SubStation Alpha")
+        print("   - 支持丰富样式和特效")
+        print("   - 动漫字幕组常用")
+        print("   - 兼容性: VLC, MPC-HC, PotPlayer")
+        print()
+        print("4. SSA  - SubStation Alpha")
+        print("   - ASS 的前身")
+        print("   - 兼容性更好但功能较少")
+        print("   - 适合老式播放器")
+        print()
+        print("5. SUB  - MicroDVD")
+        print("   - 基于帧数而非时间")
+        print("   - 老式 DVD 播放器支持")
+        print("   - 不推荐用于新项目")
+        print()
+    
+    elif command == 'convert':
+        if len(sys.argv) < 4:
+            print("错误: 缺少参数")
+            print("用法: python subtitle_converter.py convert <input.srt> <format>")
+            sys.exit(1)
+        
+        input_path = sys.argv[2]
+        output_format = sys.argv[3]
+        
+        try:
+            output_path = SubtitleConverter.convert_file(input_path, output_format)
+            print(f"✅ 转换成功: {output_path}")
+        except Exception as e:
+            print(f"❌ 转换失败: {e}")
+            sys.exit(1)
+    
+    elif command == 'convert-all':
+        if len(sys.argv) < 3:
+            print("错误: 缺少输入文件")
+            print("用法: python subtitle_converter.py convert-all <input.srt>")
+            sys.exit(1)
+        
+        input_path = sys.argv[2]
+        
+        print(f"正在转换 {Path(input_path).name} 为所有格式...\n")
+        
+        results = SubtitleConverter.convert_to_all_formats(input_path)
+        
+        print("转换结果：")
+        for fmt, path in results.items():
+            print(f"  ✅ {fmt.upper()}: {Path(path).name}")
+        
+        print(f"\n共生成 {len(results)} 个文件")
+    
+    else:
+        print(f"错误: 未知命令 '{command}'")
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()
