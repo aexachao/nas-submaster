@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="assets/logo.png" width="10%" />
+<img src="assets/logo.png" width="15%" />
 
 <h1 style="margin-top: 10px; margin-bottom: 0; border-bottom: none;">
 NAS SubMaster (NAS 字幕管家)
