@@ -1,23 +1,20 @@
 <div align="center">
 
-<img src="assets/logo.png" width="20%" />
+<img src="assets/logo.png" width="10%" />
 
-<!-- 关键：添加 border-bottom: none; 去掉标题下的横线 -->
 <h1 style="margin-top: 10px; margin-bottom: 0; border-bottom: none;">
 NAS SubMaster (NAS 字幕管家)
 </h1>
 
-<!-- 关键：添加 margin-bottom: 5px; 缩小与下方徽章的距离 -->
 <p style="font-size: 16px; font-weight: bold; margin-top: 5px; margin-bottom: 5px;">
 基于 Whisper + LLM 的全自动视频字幕提取与翻译工具
 </p>
 
-<!-- 移除了 <br> 标签，让徽章紧贴着说明文字 -->
-[![Docker Pulls](https://img.shields.io/docker/pulls/aexachao/nas-subtitle-manager.svg?logo=docker&label=Docker%20Pulls)](https://hub.docker.com/r/aexachao/nas-subtitle-manager)
-[![Python](https://img.shields.io/badge/Python-3.10+-yellow?logo=python)](https://www.python.org/)
-[![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL--3.0-blue.svg)](LICENSE)
+<!-- 这里的 <hr> 就是导致横线的原因，删掉它！ -->
 
-<hr>
+[![Docker Pulls](https://img.shields.io/docker/pulls/aexachao/nas-subtitle-manager.svg?logo=docker&label=Docker%20Pulls)]([https://hub.docker.com/r/aexachao/nas-subtitle-manager)
+[![Python](https://img.shields.io/badge/Python-3.10+-blue?logo=python)](https://www.python.org/)
+[![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL--3.0-orange.svg)](LICENSE)
 
 </div>
 
