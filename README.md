@@ -62,7 +62,7 @@ version: '3.8'
 services:
   nas-subtitle:
     image: aexachao/nas-subtitle-manager:latest
-    container_name: nas-subtitle
+    container_name: nas-submaster
     restart: unless-stopped
     ports:
       - "8501:8501"
