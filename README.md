@@ -1,10 +1,26 @@
-# 🎬 NAS Subtitle Manager (NAS 字幕管家)
+<div align="center">
 
-> **基于 Whisper + LLM 的全自动视频字幕提取与翻译工具**
+<img src="assets/logo.png" width="20%" />
 
-[![Docker Image](https://img.shields.io/badge/Docker%20Image-aexachao%2Fnas--subtitle--manager-blue?logo=docker)](https://hub.docker.com/r/aexachao/nas-subtitle-manager)
+<!-- 关键：添加 border-bottom: none; 去掉标题下的横线 -->
+<h1 style="margin-top: 10px; margin-bottom: 0; border-bottom: none;">
+NAS SubMaster (NAS 字幕管家)
+</h1>
+
+<!-- 关键：添加 margin-bottom: 5px; 缩小与下方徽章的距离 -->
+<p style="font-size: 16px; font-weight: bold; margin-top: 5px; margin-bottom: 5px;">
+基于 Whisper + LLM 的全自动视频字幕提取与翻译工具
+</p>
+
+<!-- 移除了 <br> 标签，让徽章紧贴着说明文字 -->
+[![Docker Pulls](https://img.shields.io/docker/pulls/aexachao/nas-subtitle-manager.svg?logo=docker&label=Docker%20Pulls)](https://hub.docker.com/r/aexachao/nas-subtitle-manager)
 [![Python](https://img.shields.io/badge/Python-3.10+-yellow?logo=python)](https://www.python.org/)
-[![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+[![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL%20v3-blue.svg)](LICENSE)
+
+<hr>
+
+</div>
+
 
 **NAS 字幕管家** 是一个专为家庭 NAS 用户设计的智能化字幕工具。本项目已完成 **深度代码重构**，采用 **UI 与业务逻辑分离** 的模块化架构，运行更稳定，扩展性更强。
 
@@ -99,38 +115,42 @@ docker compose up -d
 本项目采用了清晰的分层架构：
 
 ```text
-nas-subtitle-manager/
-├── app.py                   # [入口] 应用程序启动入口
-├── core/                    # [核心] 基础配置与类型定义
-│   ├── config.py            # 全局配置管理
-│   ├── models.py            # 数据模型定义
-│   └── worker.py            # 后台任务处理线程
-├── database/                # [数据层] 数据库交互
-│   ├── connection.py        # 数据库连接池
-│   ├── media_dao.py         # 媒体文件数据访问对象
-│   └── task_dao.py          # 任务队列数据访问对象
-├── services/                # [业务层] 核心逻辑实现
-│   ├── media_scanner.py     # 媒体库扫描与目录树构建
-│   ├── subtitle_converter.py# 字幕格式处理
-│   ├── translator.py        # LLM 翻译逻辑封装
-│   └── whisper_service.py   # 语音识别服务
-├── ui/                      # [表现层] 界面组件
-│   ├── components.py        # 通用 UI 组件
-│   ├── pages/               # 页面视图
-│   │   ├── media_library.py # 媒体库页面
-│   │   └── task_queue.py    # 任务队列页面
-│   ├── sidebar.py           # 侧边栏配置
-│   └── styles.py            # CSS 样式定义
-└── utils/                   # [工具] 通用工具函数
-    ├── format_utils.py      # 字符串与时间格式化
-    └── lang_detection.py    # 语言检测工具
+nas-submaster/
+├── app.py
+├── assets
+│   └── logo.png
+├── core
+│   ├── config.py
+│   ├── models.py
+│   └── worker.py
+├── database
+│   ├── connection.py
+│   ├── media_dao.py
+│   └── task_dao.py
+├── Dockerfile
+├── requirements.txt
+├── services
+│   ├── media_scanner.py
+│   ├── subtitle_converter.py
+│   ├── translator.py
+│   └── whisper_service.py
+├── ui
+│   ├── components.py
+│   ├── pages
+│   │   ├── media_library.py
+│   │   └── task_queue.py
+│   ├── settings_modal.py
+│   └── styles.py
+└── utils
+    ├── format_utils.py
+    └── lang_detection.py
 ```
 
 ---
 
 ## 📖 使用指南
 
-启动成功后，浏览器访问：`http://NAS_IP:8501`
+启动成功后，浏览器访问：`http://localhost:8501`
 
 ### 1. 媒体库扫描 (Sub-folder Scanning)
 在首页 **"媒体库"** 区域：
@@ -168,7 +188,9 @@ A: 可以通过 `docker logs -f nas-subtitle` 查看后端详细运行日志。
 
 ## 📄 开源协议
 
-本项目采用 [MIT License](LICENSE) 开源。
+本项目采用 [AGPL-3,0](LICENSE) 协议开源。
+
+**简单来说**：你可以自由使用、修改和商用本项目，但如果你把它做成网站或服务给别人用，需要公开你的源代码。
 
 ---
 
