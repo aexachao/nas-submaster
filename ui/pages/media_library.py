@@ -7,6 +7,7 @@
 """
 
 import time
+from pathlib import Path
 from typing import Optional
 import streamlit as st
 
@@ -14,7 +15,8 @@ from database.media_dao import MediaDAO
 from database.task_dao import TaskDAO
 from services.media_scanner import (
     scan_media_directory,
-    discover_media_subdirectories
+    discover_media_subdirectories,
+    MEDIA_ROOT
 )
 from utils.format_utils import format_file_size
 
@@ -79,15 +81,19 @@ def render_media_library_page(debug_mode: bool = False):
         
         files = MediaDAO.get_media_files_filtered(filter_map[filter_type])
         
-        # 如果选择了子目录，进一步过滤
+        # 如果选择了子目录，使用路径前缀精确过滤，避免目录名子串误匹配
         if selected_dirs:
-            # 只要文件路径包含任意一个被选中的目录路径即可
             filtered_files = []
             for f in files:
+                fpath = Path(f.file_path)
                 for d in selected_dirs:
-                    if d in f.file_path:
+                    dir_path = Path(MEDIA_ROOT) / d
+                    try:
+                        fpath.relative_to(dir_path)
                         filtered_files.append(f)
                         break
+                    except ValueError:
+                        continue
             files = filtered_files
         
         # 统计选中文件

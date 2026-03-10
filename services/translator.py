@@ -16,6 +16,8 @@ from pathlib import Path
 from openai import OpenAI
 from dataclasses import dataclass
 
+from core.models import SubtitleEntry
+
 
 @dataclass
 class TranslationConfig:
@@ -28,29 +30,6 @@ class TranslationConfig:
     max_lines_per_batch: int = 500  # 每批最多翻译多少行
     max_retries: int = 3
     timeout: int = 180
-
-
-class SubtitleEntry:
-    """字幕条目"""
-    def __init__(self, index: str, timecode: str, text: str):
-        self.index = index
-        self.timecode = timecode
-        self.text = text
-    
-    def to_dict(self) -> Dict:
-        return {
-            'index': self.index,
-            'timecode': self.timecode,
-            'text': self.text
-        }
-    
-    @classmethod
-    def from_dict(cls, data: Dict) -> 'SubtitleEntry':
-        return cls(
-            index=str(data.get('index', '1')),
-            timecode=str(data.get('timecode', '00:00:00,000 --> 00:00:01,000')),
-            text=str(data.get('text', ''))
-        )
 
 
 class TranslationError(Exception):
@@ -218,29 +197,29 @@ Now output the COMPLETE JSON array (no extra text, no abbreviations):"""
             )
         
         # 尝试解析 JSON
+        data = None
         try:
             data = json.loads(response)
         except json.JSONDecodeError as e:
             # JSON 解析失败，尝试修复常见问题
-            
+            stripped = response.rstrip()
+
             # 尝试 1: 移除尾部逗号（如果有）
-            if response.rstrip().endswith(',]'):
-                response = response.rstrip()[:-2] + ']'
+            if stripped.endswith(',]'):
                 try:
-                    data = json.loads(response)
-                except:
+                    data = json.loads(stripped[:-2] + ']')
+                except json.JSONDecodeError:
                     pass
-            
-            # 尝试 2: 检查是否缺少闭合括号
-            if not response.rstrip().endswith(']'):
-                response = response.rstrip() + ']'
+
+            # 尝试 2: 补全缺失的闭合括号
+            if data is None and not stripped.endswith(']'):
                 try:
-                    data = json.loads(response)
-                except:
+                    data = json.loads(stripped + ']')
+                except json.JSONDecodeError:
                     pass
-            
+
             # 如果仍然失败，抛出详细错误
-            if 'data' not in locals():
+            if data is None:
                 raise ParseError(
                     f"JSON 解析失败: {e}\n"
                     f"原始响应预览: {response[:300]}...\n"
@@ -276,39 +255,46 @@ Now output the COMPLETE JSON array (no extra text, no abbreviations):"""
         
         return translations
     
+    def _split_and_translate(
+        self,
+        entries: List[SubtitleEntry],
+        context_before: Optional[str] = None,
+        context_after: Optional[str] = None
+    ) -> List[SubtitleEntry]:
+        """
+        将批次拆分为两半分别翻译（用于 AI 返回省略格式时的降级处理）
+        """
+        print(f"[智能降级] 批次过大 ({len(entries)} 行)，自动拆分为 2 个子批次")
+        mid = len(entries) // 2
+        ctx_mid_after = entries[mid].text if mid < len(entries) else None
+        ctx_mid_before = entries[mid - 1].text if mid > 0 else None
+        batch1 = self._translate_batch(entries[:mid], context_before, ctx_mid_after)
+        batch2 = self._translate_batch(entries[mid:], ctx_mid_before, context_after)
+        return batch1 + batch2
+
     def _translate_batch(
         self,
         entries: List[SubtitleEntry],
         context_before: Optional[str] = None,
         context_after: Optional[str] = None,
-        retry_count: int = 0
     ) -> List[SubtitleEntry]:
         """
-        翻译一批字幕（带重试和智能降级）
-        
+        翻译一批字幕（带重试，检测到省略格式时自动拆分降级）
+
         Args:
             entries: 要翻译的字幕条目
             context_before: 前文上下文
             context_after: 后文上下文
-            retry_count: 当前重试次数（用于智能降级）
-        
+
         Returns:
             翻译后的字幕条目
-        
+
         Raises:
             APIError: API 调用失败
             ParseError: 解析失败
         """
-        # 智能降级：如果批次过大导致 AI 返回省略格式，自动拆分
-        if len(entries) > 100 and retry_count >= 2:
-            print(f"[智能降级] 批次过大 ({len(entries)} 行)，自动拆分为 2 个子批次")
-            mid = len(entries) // 2
-            batch1 = self._translate_batch(entries[:mid], context_before, entries[mid].text, 0)
-            batch2 = self._translate_batch(entries[mid:], entries[mid-1].text, context_after, 0)
-            return batch1 + batch2
-        
         prompt = self._build_translation_prompt(entries, context_before, context_after)
-        
+
         last_error = None
         for attempt in range(self.config.max_retries):
             try:
@@ -318,10 +304,10 @@ Now output the COMPLETE JSON array (no extra text, no abbreviations):"""
                     temperature=0.3,
                     timeout=self.config.timeout
                 )
-                
+
                 raw_response = response.choices[0].message.content.strip()
                 translations = self._parse_translation_response(raw_response, len(entries))
-                
+
                 # 构建翻译后的字幕条目
                 translated_entries = []
                 for entry, translation in zip(entries, translations):
@@ -332,27 +318,25 @@ Now output the COMPLETE JSON array (no extra text, no abbreviations):"""
                             text=translation
                         )
                     )
-                
+
                 return translated_entries
-                
+
             except ParseError as e:
                 last_error = e
                 error_msg = str(e)
-                
-                # 检查是否是省略格式导致的错误
-                if "省略格式" in error_msg or "..." in error_msg:
-                    print(f"[翻译] 检测到省略格式，批次大小: {len(entries)} 行")
-                    # 触发智能降级
-                    if len(entries) > 50:
-                        return self._translate_batch(entries, context_before, context_after, retry_count + 99)
-                
+
+                # 检测到省略格式：直接拆分，不再重试当前批次
+                if ("省略格式" in error_msg or "..." in error_msg) and len(entries) > 50:
+                    print(f"[翻译] 检测到省略格式，批次大小: {len(entries)} 行，触发拆分降级")
+                    return self._split_and_translate(entries, context_before, context_after)
+
                 if attempt < self.config.max_retries - 1:
                     wait_time = (attempt + 1) * 2
                     print(f"[翻译] 解析失败，{wait_time}秒后重试 ({attempt+1}/{self.config.max_retries}): {error_msg[:100]}")
                     time.sleep(wait_time)
                 else:
                     raise
-            
+
             except Exception as e:
                 last_error = APIError(f"API 调用失败: {e}")
                 if attempt < self.config.max_retries - 1:
@@ -361,7 +345,7 @@ Now output the COMPLETE JSON array (no extra text, no abbreviations):"""
                     time.sleep(wait_time)
                 else:
                     raise last_error
-        
+
         # 不应该到达这里
         raise last_error or TranslationError("翻译失败，原因未知")
     

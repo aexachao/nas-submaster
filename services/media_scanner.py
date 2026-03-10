@@ -9,7 +9,7 @@ import os
 from pathlib import Path
 from typing import List, Tuple, Optional
 
-from core.models import SubtitleInfo, SUPPORTED_VIDEO_EXTENSIONS
+from core.models import SubtitleInfo, SUPPORTED_VIDEO_EXTENSIONS, SUPPORTED_SUBTITLE_FORMATS
 from database.media_dao import MediaDAO
 from utils.lang_detection import detect_language_combined
 
@@ -181,7 +181,7 @@ class MediaScanner:
             potential_subs = [
                 p for p in all_files
                 if p.is_file()
-                and p.name.lower().endswith('.srt')
+                and p.suffix.lower().lstrip('.') in SUPPORTED_SUBTITLE_FORMATS
                 and p.name.lower().startswith(base_name.lower())
             ]
             

@@ -252,16 +252,15 @@ Format: Marked, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         return '\n'.join(lines)
     
     @staticmethod
-    def to_sub(entries: List[SubtitleEntry]) -> str:
+    def to_sub(entries: List[SubtitleEntry], fps: float = 25.0) -> str:
         """
         转换为 SUB (MicroDVD) 格式
-        
+
         格式示例:
         {100}{200}Hello, world!
-        
-        注意: SUB 使用帧数而非时间，这里假设 25fps
+
+        注意: SUB 使用帧数而非时间，默认 25fps，可通过参数指定实际帧率
         """
-        fps = 25  # 假设 25 帧每秒
         lines = []
         
         for entry in entries:
@@ -276,9 +275,10 @@ Format: Marked, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         return '\n'.join(lines)
     
     @staticmethod
-    def convert_file(input_path: str, 
+    def convert_file(input_path: str,
                     output_format: str,
-                    output_path: Optional[str] = None) -> str:
+                    output_path: Optional[str] = None,
+                    fps: float = 25.0) -> str:
         """
         转换字幕文件格式
         
@@ -311,7 +311,7 @@ Format: Marked, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         elif output_format == 'ssa':
             output_content = SubtitleConverter.to_ssa(entries)
         elif output_format == 'sub':
-            output_content = SubtitleConverter.to_sub(entries)
+            output_content = SubtitleConverter.to_sub(entries, fps)
         else:
             raise ValueError(f"不支持的格式: {output_format}")
         

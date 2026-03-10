@@ -15,7 +15,7 @@ from core.config import (
     get_content_type_display_name,
     get_content_type_description
 )
-from core.models import ContentType, ISO_LANG_MAP, TARGET_LANG_OPTIONS
+from core.models import ContentType, ISO_LANG_MAP, TARGET_LANG_OPTIONS, WHISPER_SOURCE_LANG_MAP
 from database.connection import get_db_connection
 
 
@@ -177,13 +177,17 @@ def render_settings_dialog():
             
         st.markdown("<br>", unsafe_allow_html=True)
         
-        # 源语言
-        lang_keys = list(ISO_LANG_MAP.keys())
+        # 源语言（仅列出合法的 Whisper ISO 639-1 语言代码）
+        lang_keys = list(WHISPER_SOURCE_LANG_MAP.keys())
+        curr_source_lang = config.whisper.source_language
+        # 兼容旧配置中可能保存的非法代码（如 'chs'、'eng'），回退到 'auto'
+        if curr_source_lang not in lang_keys:
+            curr_source_lang = 'auto'
         source_lang = st.selectbox(
             "视频原声语言",
             lang_keys,
-            format_func=lambda x: ISO_LANG_MAP[x],
-            index=lang_keys.index(config.whisper.source_language)
+            format_func=lambda x: WHISPER_SOURCE_LANG_MAP[x],
+            index=lang_keys.index(curr_source_lang)
         )
         whisper_changes['source_language'] = source_lang
 
@@ -252,9 +256,9 @@ def render_settings_dialog():
                     model_name = st.text_input("模型名称 (手动)", value=provider_cfg.model_name, key=f"set_model_man_{provider}")
             with col_m2:
                 if st.button("刷新", key=f"set_ref_{provider}", use_container_width=True):
-                    # 清除缓存的模型列表，强制重新获取
-                    st.cache_data.clear()
+                    # 触发页面重新渲染，fetch_ollama_models 会重新请求
                     st.toast("模型列表已刷新")
+                    st.rerun()
             api_key = ""
         else:
             model_name = st.text_input("模型名称", value=provider_cfg.model_name, key=f"set_model_{provider}")

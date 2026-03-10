@@ -17,19 +17,39 @@ class MediaDAO:
     
     @staticmethod
     def get_all_media_files() -> List[MediaFile]:
+        """获取所有媒体文件"""
+        return MediaDAO.get_media_files_filtered(None)
+
+    @staticmethod
+    def get_media_files_filtered(
+        has_subtitle: Optional[bool] = None
+    ) -> List[MediaFile]:
         """
-        获取所有媒体文件
-        
+        获取筛选后的媒体文件（筛选条件下推到 SQL，避免全表加载后内存过滤）
+
+        Args:
+            has_subtitle: 是否有字幕（None=全部, True=有字幕, False=无字幕）
+
         Returns:
             媒体文件列表
         """
         conn = get_db_connection()
         try:
-            cursor = conn.execute(
+            base = (
                 "SELECT id, file_path, file_name, file_size, subtitles_json, "
-                "has_translated, updated_at FROM media_files ORDER BY file_name"
+                "has_translated, updated_at FROM media_files"
             )
-            
+            if has_subtitle is True:
+                query = base + " WHERE json_array_length(subtitles_json) > 0 ORDER BY file_name"
+            elif has_subtitle is False:
+                query = (
+                    base + " WHERE subtitles_json IS NULL"
+                    " OR json_array_length(subtitles_json) = 0 ORDER BY file_name"
+                )
+            else:
+                query = base + " ORDER BY file_name"
+
+            cursor = conn.execute(query)
             media_files = []
             for row in cursor.fetchall():
                 try:
@@ -46,30 +66,9 @@ class MediaDAO:
                 except Exception as e:
                     print(f"[MediaDAO] Failed to parse media file {row[0]}: {e}")
                     continue
-            
             return media_files
         finally:
             conn.close()
-    
-    @staticmethod
-    def get_media_files_filtered(
-        has_subtitle: Optional[bool] = None
-    ) -> List[MediaFile]:
-        """
-        获取筛选后的媒体文件
-        
-        Args:
-            has_subtitle: 是否有字幕（None=全部, True=有字幕, False=无字幕）
-        
-        Returns:
-            媒体文件列表
-        """
-        all_files = MediaDAO.get_all_media_files()
-        
-        if has_subtitle is None:
-            return all_files
-        
-        return [f for f in all_files if f.has_subtitle == has_subtitle]
     
     @staticmethod
     def get_media_by_path(file_path: str) -> Optional[MediaFile]:

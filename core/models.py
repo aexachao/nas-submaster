@@ -298,3 +298,16 @@ ISO_LANG_MAP = {
 
 # 目标语言选项
 TARGET_LANG_OPTIONS = ['zh', 'en', 'ja', 'ko']
+
+# Whisper 源语言选项（仅包含合法的 ISO 639-1 代码）
+WHISPER_SOURCE_LANG_MAP = {
+    'auto': '自动检测',
+    'zh': '中文',
+    'en': '英语',
+    'ja': '日语',
+    'ko': '韩语',
+    'fr': '法语',
+    'de': '德语',
+    'ru': '俄语',
+    'es': '西班牙语',
+}

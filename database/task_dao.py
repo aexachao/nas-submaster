@@ -271,9 +271,30 @@ class TaskDAO:
     def has_processing_task() -> bool:
         """
         检查是否有正在处理的任务
-        
+
         Returns:
             bool: 是否有处理中的任务
         """
         count = TaskDAO.get_task_count_by_status(TaskStatus.PROCESSING)
         return count > 0
+
+    @staticmethod
+    def reset_stale_processing_tasks():
+        """
+        将遗留的 PROCESSING 状态任务重置为 PENDING
+        用于 Worker 启动时处理上次崩溃留下的死锁任务
+        """
+        conn = get_db_connection()
+        try:
+            cursor = conn.execute(
+                "UPDATE tasks SET status='pending', progress=0, log='重启后自动重置', "
+                "updated_at=CURRENT_TIMESTAMP WHERE status='processing'"
+            )
+            if cursor.rowcount > 0:
+                print(f"[TaskDAO] Reset {cursor.rowcount} stale processing task(s) to pending")
+            conn.commit()
+        except Exception as e:
+            print(f"[TaskDAO] Failed to reset stale tasks: {e}")
+            conn.rollback()
+        finally:
+            conn.close()
