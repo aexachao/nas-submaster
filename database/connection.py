@@ -11,7 +11,7 @@ from typing import Optional
 
 
 # 数据库路径
-DB_PATH = "/data/subtitle_manager.db"
+DB_PATH = "./data/subtitle_manager.db"
 
 
 def get_db_connection() -> sqlite3.Connection:
