@@ -6,7 +6,7 @@
 """
 
 import json
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 from database.connection import get_db_connection, execute_many
 from core.models import MediaFile, SubtitleInfo
@@ -21,14 +21,48 @@ class MediaDAO:
         return MediaDAO.get_media_files_filtered(None)
 
     @staticmethod
+    def _build_where_clause(has_subtitle: Optional[bool]) -> Tuple[str, list]:
+        """构建 WHERE 子句和参数列表"""
+        if has_subtitle is True:
+            return " WHERE json_array_length(subtitles_json) > 0", []
+        elif has_subtitle is False:
+            return " WHERE subtitles_json IS NULL OR json_array_length(subtitles_json) = 0", []
+        return "", []
+
+    @staticmethod
+    def get_media_files_count(has_subtitle: Optional[bool] = None) -> int:
+        """
+        获取筛选后的媒体文件总数（用于分页）
+
+        Args:
+            has_subtitle: 是否有字幕（None=全部, True=有字幕, False=无字幕）
+
+        Returns:
+            文件数量
+        """
+        conn = get_db_connection()
+        try:
+            where, params = MediaDAO._build_where_clause(has_subtitle)
+            result = conn.execute(
+                f"SELECT COUNT(*) FROM media_files{where}", params
+            ).fetchone()
+            return result[0] if result else 0
+        finally:
+            conn.close()
+
+    @staticmethod
     def get_media_files_filtered(
-        has_subtitle: Optional[bool] = None
+        has_subtitle: Optional[bool] = None,
+        limit: Optional[int] = None,
+        offset: int = 0
     ) -> List[MediaFile]:
         """
         获取筛选后的媒体文件（筛选条件下推到 SQL，避免全表加载后内存过滤）
 
         Args:
             has_subtitle: 是否有字幕（None=全部, True=有字幕, False=无字幕）
+            limit: 返回数量上限（None=全部）
+            offset: 跳过的行数（用于分页）
 
         Returns:
             媒体文件列表
@@ -39,17 +73,13 @@ class MediaDAO:
                 "SELECT id, file_path, file_name, file_size, subtitles_json, "
                 "has_translated, updated_at FROM media_files"
             )
-            if has_subtitle is True:
-                query = base + " WHERE json_array_length(subtitles_json) > 0 ORDER BY file_name"
-            elif has_subtitle is False:
-                query = (
-                    base + " WHERE subtitles_json IS NULL"
-                    " OR json_array_length(subtitles_json) = 0 ORDER BY file_name"
-                )
-            else:
-                query = base + " ORDER BY file_name"
+            where, params = MediaDAO._build_where_clause(has_subtitle)
+            query = base + where + " ORDER BY file_name"
+            if limit is not None:
+                query += " LIMIT ? OFFSET ?"
+                params = params + [limit, offset]
 
-            cursor = conn.execute(query)
+            cursor = conn.execute(query, params)
             media_files = []
             for row in cursor.fetchall():
                 try:

@@ -4,6 +4,7 @@
 媒体库页面
 """
 
+import html
 import time
 from pathlib import Path
 from typing import Optional
@@ -67,23 +68,8 @@ def render_media_library_page(debug_mode: bool = False):
         if st.button(refresh_text, use_container_width=True):
             _perform_scan(selected_dirs, debug_mode)
 
-    # ========== 加载并过滤文件 ==========
     filter_map = {"全部": None, "有字幕": True, "无字幕": False}
-    files = MediaDAO.get_media_files_filtered(filter_map[filter_type])
-
-    if selected_dirs:
-        filtered_files = []
-        for f in files:
-            fpath = Path(f.file_path)
-            for d in selected_dirs:
-                dir_path = Path(MEDIA_ROOT) / d
-                try:
-                    fpath.relative_to(dir_path)
-                    filtered_files.append(f)
-                    break
-                except ValueError:
-                    continue
-        files = filtered_files
+    has_subtitle_filter = filter_map[filter_type]
 
     # 筛选条件或目录变化时重置到第 1 页
     filter_key = f"{filter_type}|{','.join(selected_dirs)}"
@@ -91,10 +77,49 @@ def render_media_library_page(debug_mode: bool = False):
         st.session_state['_media_page'] = 0
         st.session_state['_last_filter_key'] = filter_key
 
+    current_page = st.session_state.get('_media_page', 0)
+    page_size = st.session_state.get('_media_page_size', DEFAULT_PAGE_SIZE)
+
+    # ========== 加载文件 ==========
+    # 有目录过滤时需要 Python 端过滤，加载全量后切片；否则走 SQL LIMIT/OFFSET
+    try:
+        if selected_dirs:
+            all_files = MediaDAO.get_media_files_filtered(has_subtitle_filter)
+            filtered_files = []
+            for f in all_files:
+                fpath = Path(f.file_path)
+                for d in selected_dirs:
+                    dir_path = Path(MEDIA_ROOT) / d
+                    try:
+                        fpath.relative_to(dir_path)
+                        filtered_files.append(f)
+                        break
+                    except ValueError:
+                        continue
+            total_count = len(filtered_files)
+            start = current_page * page_size
+            page_files = filtered_files[start:start + page_size]
+        else:
+            total_count = MediaDAO.get_media_files_count(has_subtitle_filter)
+            start = current_page * page_size
+            page_files = MediaDAO.get_media_files_filtered(
+                has_subtitle_filter, limit=page_size, offset=start
+            )
+    except Exception as e:
+        st.error(f"加载媒体库失败: {e}")
+        return
+
+    # 维护 id→file_path 缓存，供跨页"开始处理"使用
+    if '_id_to_path' not in st.session_state:
+        st.session_state['_id_to_path'] = {}
+    for f in page_files:
+        st.session_state['_id_to_path'][f.id] = f.file_path
+
     # ========== 列 5: 开始按钮 ==========
     with col_start:
         selected_count = sum(
-            1 for f in files if st.session_state.get(f"s_{f.id}", False)
+            1 for k, v in st.session_state.items()
+            if isinstance(k, str) and k.startswith('s_') and v is True
         )
         btn_text = f"处理 ({selected_count})" if selected_count > 0 else "开始处理"
         if st.button(
@@ -103,24 +128,19 @@ def render_media_library_page(debug_mode: bool = False):
             use_container_width=True,
             disabled=(selected_count == 0)
         ):
-            _add_tasks_for_selected_files(files)
+            _add_tasks_for_selected_files()
 
     # ========== 统计信息 ==========
     st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
-    _render_statistics(len(files), selected_count, selected_dirs, filter_type)
+    _render_statistics(total_count, selected_count, selected_dirs, filter_type)
     st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
 
     # ========== 空状态 ==========
-    if not files:
+    if total_count == 0:
         st.info(f"选中目录下暂无{filter_type}文件" if selected_dirs else "暂无文件，请先扫描媒体库")
         return
 
     # ========== 全选（作用于当前页）==========
-    current_page = st.session_state.get('_media_page', 0)
-    page_size = st.session_state.get('_media_page_size', DEFAULT_PAGE_SIZE)
-    start = current_page * page_size
-    page_files = files[start:start + page_size]
-
     current_select_all = st.checkbox("全选（当前页）", key="select_all_box")
     last_select_all = st.session_state.get("_last_select_all", False)
 
@@ -135,7 +155,7 @@ def render_media_library_page(debug_mode: bool = False):
         _render_media_card(f)
 
     # ========== 分页控件 ==========
-    _render_pagination(len(files), current_page, page_size)
+    _render_pagination(total_count, current_page, page_size)
 
 
 def _render_pagination(total: int, current_page: int, page_size: int):
@@ -201,18 +221,28 @@ def _render_statistics(total: int, selected: int, selected_dirs: list, filter_ty
     st.caption(" | ".join(info_parts))
 
 
-def _add_tasks_for_selected_files(files: list):
-    """为选中的文件添加任务"""
+def _add_tasks_for_selected_files():
+    """为选中的文件添加任务（从 session_state 缓存中读取）"""
     success_count = 0
     failed_files = []
+    id_to_path = st.session_state.get('_id_to_path', {})
 
-    for f in files:
-        if st.session_state.get(f"s_{f.id}", False):
-            ok, msg = TaskDAO.add_task(f.file_path)
-            if ok:
-                success_count += 1
-            else:
-                failed_files.append((f.file_name, msg))
+    for key, selected in list(st.session_state.items()):
+        if not (isinstance(key, str) and key.startswith('s_') and selected is True):
+            continue
+        try:
+            file_id = int(key[2:])
+        except ValueError:
+            continue
+        file_path = id_to_path.get(file_id)
+        if not file_path:
+            continue
+        ok, msg = TaskDAO.add_task(file_path)
+        if ok:
+            success_count += 1
+        else:
+            file_name = Path(file_path).name
+            failed_files.append((file_name, msg))
 
     if failed_files:
         st.warning(f"已添加 {success_count} 个任务，{len(failed_files)} 个失败")
@@ -265,7 +295,11 @@ def _render_media_card(media_file):
                 cls = "chip-blue"
             else:
                 cls = "chip-gray"
-            badges += f"<span class='status-chip {cls}'>{sub.tag}</span>"
+            badges += f"<span class='status-chip {cls}'>{html.escape(sub.tag)}</span>"
+
+    file_name = html.escape(media_file.file_name)
+    file_path = html.escape(media_file.file_path)
+    file_size = html.escape(format_file_size(media_file.file_size))
 
     # 布局：复选框 + 卡片 + 刷新按钮
     c_check, c_card, c_rescan = st.columns([0.5, 19, 1.5], gap="medium", vertical_alignment="center")
@@ -282,14 +316,14 @@ def _render_media_card(media_file):
             <div class="hero-card">
                 <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
                     <div style="font-weight:600; font-size:15px; overflow:hidden; white-space:nowrap; text-overflow:ellipsis;">
-                        {media_file.file_name}
+                        {file_name}
                     </div>
                     <div style="font-size:12px; color:#71717a; min-width:60px; text-align:right;">
-                        {format_file_size(media_file.file_size)}
+                        {file_size}
                     </div>
                 </div>
                 <div style="font-size:12px; color:#52525b; margin-bottom:12px; font-family:monospace;">
-                    {media_file.file_path}
+                    {file_path}
                 </div>
                 <div>{badges}</div>
             </div>

@@ -5,7 +5,7 @@
 显示和管理任务
 """
 
-import time
+import html
 from pathlib import Path
 import streamlit as st
 
@@ -25,25 +25,24 @@ def render_task_queue_page():
             TaskDAO.clear_completed_tasks()
             st.rerun()
 
-    # 加载任务列表
-    tasks = TaskDAO.get_all_tasks()
+    _render_task_list()
 
-    # 空状态
+
+@st.fragment(run_every=3)
+def _render_task_list():
+    """渲染任务列表（处理中时每 3 秒自动刷新）"""
+    try:
+        tasks = TaskDAO.get_all_tasks()
+    except Exception as e:
+        st.error(f"加载任务列表失败: {e}")
+        return
+
     if not tasks:
         st.info("队列为空")
         return
 
-    # 检查是否有处理中的任务
-    has_processing = any(t.status == TaskStatus.PROCESSING for t in tasks)
-
-    # 渲染任务列表
     for task in tasks:
         _render_task_card(task)
-
-    # 如果有处理中的任务，自动刷新
-    if has_processing:
-        time.sleep(3)
-        st.rerun()
 
 
 def _render_task_card(task):
@@ -63,12 +62,17 @@ def _render_task_card(task):
         ('chip-gray', task.status.value)
     )
 
+    file_name = html.escape(Path(task.file_path).name)
+    log_text = html.escape(task.log)
+    created_at = html.escape(str(task.created_at or ''))
+    status_text_escaped = html.escape(status_text)
+
     # 进度条 HTML (单行)
     progress_html = ""
     if task.status == TaskStatus.PROCESSING:
         progress_html = f"""<div style="margin-top:12px; margin-bottom:8px;"><div style="width:100%; height:4px; background-color:#27272a; border-radius:2px; overflow:hidden;"><div style="width:{task.progress}%; height:100%; background-color:#2563eb; transition:width 0.3s;"></div></div><div style="font-size:11px; color:#71717a; margin-top:4px; text-align:right;">{task.progress}%</div></div>"""
 
-    html_content = f"""<div class="task-card-wrapper"><div class="hero-card"><div style="display:flex; justify-content:space-between; align-items:flex-start;"><div style="flex:1;"><div style="font-weight:600; margin-bottom:8px;">{Path(task.file_path).name}</div><div style="font-size:13px; color:#a1a1aa;">> {task.log}</div></div><div style="display:flex; flex-direction:column; align-items:flex-end; gap:8px; margin-left:16px;"><span style="font-size:11px; color:#71717a;">{task.created_at}</span><span class="status-chip {css_class}">{status_text}</span></div></div>{progress_html}</div></div>"""
+    html_content = f"""<div class="task-card-wrapper"><div class="hero-card"><div style="display:flex; justify-content:space-between; align-items:flex-start;"><div style="flex:1;"><div style="font-weight:600; margin-bottom:8px;">{file_name}</div><div style="font-size:13px; color:#a1a1aa;">&gt; {log_text}</div></div><div style="display:flex; flex-direction:column; align-items:flex-end; gap:8px; margin-left:16px;"><span style="font-size:11px; color:#71717a;">{created_at}</span><span class="status-chip {css_class}">{status_text_escaped}</span></div></div>{progress_html}</div></div>"""
 
     st.markdown(html_content, unsafe_allow_html=True)
 
