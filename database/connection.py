@@ -29,6 +29,7 @@ def init_database():
     初始化数据库表结构
     如果表不存在则创建
     """
+    Path(DB_PATH).parent.mkdir(parents=True, exist_ok=True)
     conn = get_db_connection()
     try:
         cursor = conn.cursor()
