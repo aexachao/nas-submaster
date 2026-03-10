@@ -20,6 +20,7 @@ class TaskStatus(Enum):
     PROCESSING = 'processing'
     COMPLETED = 'completed'
     FAILED = 'failed'
+    CANCELLED = 'cancelled'
 
 
 class ContentType(Enum):
@@ -188,9 +189,10 @@ class Task:
     status: TaskStatus
     progress: int = 0
     log: str = ''
+    log_history: str = ''
     created_at: Optional[str] = None
     updated_at: Optional[str] = None
-    
+
     def to_dict(self) -> Dict:
         return {
             'id': self.id,
@@ -198,22 +200,24 @@ class Task:
             'status': self.status.value if isinstance(self.status, TaskStatus) else self.status,
             'progress': self.progress,
             'log': self.log,
+            'log_history': self.log_history,
             'created_at': self.created_at,
             'updated_at': self.updated_at
         }
-    
+
     @classmethod
     def from_dict(cls, data: Dict) -> 'Task':
         status = data['status']
         if isinstance(status, str):
             status = TaskStatus(status)
-        
+
         return cls(
             id=data['id'],
             file_path=data['file_path'],
             status=status,
             progress=data.get('progress', 0),
             log=data.get('log', ''),
+            log_history=data.get('log_history', ''),
             created_at=data.get('created_at'),
             updated_at=data.get('updated_at')
         )

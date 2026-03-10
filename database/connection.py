@@ -55,10 +55,18 @@ def init_database():
                 status TEXT DEFAULT 'pending',
                 progress INTEGER DEFAULT 0,
                 log TEXT DEFAULT '',
+                log_history TEXT DEFAULT '',
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
+
+        # 兼容旧数据库：若 log_history 列不存在则添加
+        try:
+            cursor.execute("ALTER TABLE tasks ADD COLUMN log_history TEXT DEFAULT ''")
+            conn.commit()
+        except Exception:
+            pass  # 列已存在，忽略
         
         # 创建配置表
         cursor.execute("""

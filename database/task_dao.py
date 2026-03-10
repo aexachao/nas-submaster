@@ -46,17 +46,17 @@ class TaskDAO:
     def get_all_tasks() -> List[Task]:
         """
         获取所有任务
-        
+
         Returns:
             任务列表
         """
         conn = get_db_connection()
         try:
             cursor = conn.execute(
-                "SELECT id, file_path, status, progress, log, created_at, updated_at "
+                "SELECT id, file_path, status, progress, log, log_history, created_at, updated_at "
                 "FROM tasks ORDER BY id DESC"
             )
-            
+
             tasks = []
             for row in cursor.fetchall():
                 try:
@@ -66,14 +66,15 @@ class TaskDAO:
                         status=TaskStatus(row[2]),
                         progress=row[3],
                         log=row[4],
-                        created_at=row[5],
-                        updated_at=row[6]
+                        log_history=row[5] or '',
+                        created_at=row[6],
+                        updated_at=row[7]
                     )
                     tasks.append(task)
                 except Exception as e:
                     print(f"[TaskDAO] Failed to parse task {row[0]}: {e}")
                     continue
-            
+
             return tasks
         finally:
             conn.close()
@@ -82,28 +83,29 @@ class TaskDAO:
     def get_pending_task() -> Optional[Task]:
         """
         获取第一个待处理任务
-        
+
         Returns:
             任务对象，如果没有则返回 None
         """
         conn = get_db_connection()
         try:
             result = conn.execute(
-                "SELECT id, file_path, status, progress, log, created_at, updated_at "
+                "SELECT id, file_path, status, progress, log, log_history, created_at, updated_at "
                 "FROM tasks WHERE status='pending' LIMIT 1"
             ).fetchone()
-            
+
             if not result:
                 return None
-            
+
             return Task(
                 id=result[0],
                 file_path=result[1],
                 status=TaskStatus(result[2]),
                 progress=result[3],
                 log=result[4],
-                created_at=result[5],
-                updated_at=result[6]
+                log_history=result[5] or '',
+                created_at=result[6],
+                updated_at=result[7]
             )
         finally:
             conn.close()
@@ -112,32 +114,33 @@ class TaskDAO:
     def get_task_by_id(task_id: int) -> Optional[Task]:
         """
         根据 ID 获取任务
-        
+
         Args:
             task_id: 任务 ID
-        
+
         Returns:
             任务对象，如果不存在则返回 None
         """
         conn = get_db_connection()
         try:
             result = conn.execute(
-                "SELECT id, file_path, status, progress, log, created_at, updated_at "
+                "SELECT id, file_path, status, progress, log, log_history, created_at, updated_at "
                 "FROM tasks WHERE id=?",
                 (task_id,)
             ).fetchone()
-            
+
             if not result:
                 return None
-            
+
             return Task(
                 id=result[0],
                 file_path=result[1],
                 status=TaskStatus(result[2]),
                 progress=result[3],
                 log=result[4],
-                created_at=result[5],
-                updated_at=result[6]
+                log_history=result[5] or '',
+                created_at=result[6],
+                updated_at=result[7]
             )
         finally:
             conn.close()
@@ -147,44 +150,59 @@ class TaskDAO:
         task_id: int,
         status: Optional[TaskStatus] = None,
         progress: Optional[int] = None,
-        log: Optional[str] = None
+        log: Optional[str] = None,
+        append_log: bool = False
     ):
         """
         更新任务状态
-        
+
         Args:
             task_id: 任务 ID
             status: 新状态（可选）
             progress: 进度（可选）
-            log: 日志（可选）
+            log: 日志内容（可选）
+            append_log: True 时将 log 追加到 log_history，False 时仅覆盖 log 字段
         """
         conn = get_db_connection()
         try:
             updates = []
             params = []
-            
+
             if status is not None:
                 updates.append("status=?")
                 params.append(status.value if isinstance(status, TaskStatus) else status)
-            
+
             if progress is not None:
                 updates.append("progress=?")
                 params.append(progress)
-            
+
             if log is not None:
                 updates.append("log=?")
                 params.append(log)
-            
+                if append_log:
+                    # 追加到历史日志（拼接时间戳 + 内容）
+                    from datetime import datetime
+                    ts = datetime.now().strftime('%H:%M:%S')
+                    updates.append(
+                        "log_history=CASE "
+                        "  WHEN log_history='' THEN ? "
+                        "  ELSE log_history || char(10) || ? "
+                        "END"
+                    )
+                    entry = f"[{ts}] {log}"
+                    params.append(entry)
+                    params.append(entry)
+
             if not updates:
                 return
-            
+
             updates.append("updated_at=CURRENT_TIMESTAMP")
             params.append(task_id)
-            
+
             query = f"UPDATE tasks SET {','.join(updates)} WHERE id=?"
             conn.execute(query, params)
             conn.commit()
-            
+
         except Exception as e:
             print(f"[TaskDAO] Failed to update task {task_id}: {e}")
             conn.rollback()
@@ -236,7 +254,7 @@ class TaskDAO:
         try:
             conn.execute(
                 "UPDATE tasks SET status='pending', progress=0, log='重试中...', "
-                "updated_at=CURRENT_TIMESTAMP WHERE id=?",
+                "log_history='', updated_at=CURRENT_TIMESTAMP WHERE id=?",
                 (task_id,)
             )
             conn.commit()
@@ -279,6 +297,28 @@ class TaskDAO:
         return count > 0
 
     @staticmethod
+    def cancel_task(task_id: int):
+        """
+        取消任务（设为 CANCELLED 状态）
+
+        Args:
+            task_id: 任务 ID
+        """
+        conn = get_db_connection()
+        try:
+            conn.execute(
+                "UPDATE tasks SET status='cancelled', log='已取消', "
+                "updated_at=CURRENT_TIMESTAMP WHERE id=? AND status IN ('pending', 'processing')",
+                (task_id,)
+            )
+            conn.commit()
+        except Exception as e:
+            print(f"[TaskDAO] Failed to cancel task {task_id}: {e}")
+            conn.rollback()
+        finally:
+            conn.close()
+
+    @staticmethod
     def reset_stale_processing_tasks():
         """
         将遗留的 PROCESSING 状态任务重置为 PENDING
@@ -288,7 +328,7 @@ class TaskDAO:
         try:
             cursor = conn.execute(
                 "UPDATE tasks SET status='pending', progress=0, log='重启后自动重置', "
-                "updated_at=CURRENT_TIMESTAMP WHERE status='processing'"
+                "log_history='', updated_at=CURRENT_TIMESTAMP WHERE status='processing'"
             )
             if cursor.rowcount > 0:
                 print(f"[TaskDAO] Reset {cursor.rowcount} stale processing task(s) to pending")

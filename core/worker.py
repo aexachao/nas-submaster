@@ -9,7 +9,7 @@ import os
 import time
 import threading
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Callable
 
 from core.models import TaskStatus
 from core.config import AppConfig, ConfigManager
@@ -29,6 +29,8 @@ class TaskWorker:
         # 缓存 Whisper 服务实例，避免每个任务重复加载模型
         self._whisper_service: Optional[WhisperService] = None
         self._whisper_config_key: Optional[str] = None
+        # 取消标志：Worker 轮询此事件，设置后当前任务尽快退出
+        self._cancel_event = threading.Event()
 
     def start(self):
         """启动处理器（在独立线程中运行）"""
@@ -54,6 +56,23 @@ class TaskWorker:
         """停止处理器"""
         print("[TaskWorker] Stopping...")
         self.running = False
+
+    def request_cancel(self):
+        """请求取消当前正在处理的任务"""
+        self._cancel_event.set()
+
+    def _check_cancelled(self, task_id: int) -> bool:
+        """
+        检查当前任务是否已被请求取消（通过事件标志或数据库状态）
+
+        Returns:
+            True 表示应取消，False 表示继续
+        """
+        if self._cancel_event.is_set():
+            return True
+        # 也检查数据库中的状态，支持多进程场景下的取消
+        task = TaskDAO.get_task_by_id(task_id)
+        return task is not None and task.status == TaskStatus.CANCELLED
 
     def _worker_loop(self):
         """工作循环（持续处理任务）"""
@@ -104,13 +123,16 @@ class TaskWorker:
 
         流程：提取字幕 → 翻译（可选）→ 导出格式 → 更新媒体库 → 标记完成
         """
+        self._cancel_event.clear()  # 每个新任务开始前清除上次的取消信号
+
         try:
             # 更新任务状态
             TaskDAO.update_task(
                 task_id,
                 status=TaskStatus.PROCESSING,
                 progress=0,
-                log="任务启动"
+                log="任务启动",
+                append_log=True
             )
 
             # 检查文件是否存在
@@ -118,20 +140,29 @@ class TaskWorker:
                 TaskDAO.update_task(
                     task_id,
                     status=TaskStatus.FAILED,
-                    log="文件丢失"
+                    log="文件丢失",
+                    append_log=True
                 )
                 return
 
             # 步骤 1: Whisper 提取字幕
             srt_path = self._extract_subtitle(task_id, file_path, config)
             if not srt_path:
-                return  # 提取失败，状态已在内部设置
+                return  # 提取失败或已取消，状态已在内部设置
+
+            if self._check_cancelled(task_id):
+                TaskDAO.update_task(task_id, status=TaskStatus.CANCELLED, log="已取消", append_log=True)
+                return
 
             # 步骤 2: 翻译字幕（如果启用）
             if config.translation.enabled:
                 success = self._translate_subtitle(task_id, srt_path, config)
                 if not success:
-                    return  # 翻译失败，状态已在内部设置
+                    return  # 翻译失败或已取消
+
+            if self._check_cancelled(task_id):
+                TaskDAO.update_task(task_id, status=TaskStatus.CANCELLED, log="已取消", append_log=True)
+                return
 
             # 步骤 3: 导出其他格式（在标记完成之前）
             self._export_formats(task_id, file_path, config)
@@ -144,17 +175,27 @@ class TaskWorker:
                 task_id,
                 status=TaskStatus.COMPLETED,
                 progress=100,
-                log="完成"
+                log="完成",
+                append_log=True
             )
 
             print(f"[TaskWorker] Task {task_id} completed")
 
+        except InterruptedError:
+            print(f"[TaskWorker] Task {task_id} cancelled")
+            TaskDAO.update_task(
+                task_id,
+                status=TaskStatus.CANCELLED,
+                log="已取消",
+                append_log=True
+            )
         except Exception as e:
             print(f"[TaskWorker] Task {task_id} failed: {e}")
             TaskDAO.update_task(
                 task_id,
                 status=TaskStatus.FAILED,
-                log=f"异常: {str(e)[:100]}"
+                log=f"异常: {str(e)[:100]}",
+                append_log=True
             )
 
     def _extract_subtitle(
@@ -173,20 +214,25 @@ class TaskWorker:
 
         # 如果字幕已存在，跳过提取
         if srt_path.exists():
-            TaskDAO.update_task(task_id, progress=50, log="基础字幕已存在")
+            TaskDAO.update_task(task_id, progress=50, log="基础字幕已存在", append_log=True)
             return str(srt_path)
 
         try:
             TaskDAO.update_task(
                 task_id,
                 progress=5,
-                log=f"加载 Whisper ({config.whisper.model_size})..."
+                log=f"加载 Whisper ({config.whisper.model_size})...",
+                append_log=True
             )
 
             whisper = self._get_whisper_service(config)
 
             def progress_callback(current, total, message):
+                # 进度回调仅覆盖 log（高频更新不写历史，避免数据库膨胀）
                 TaskDAO.update_task(task_id, progress=current, log=message)
+                # 在回调中检测取消，触发后通过异常中断 Whisper 提取
+                if self._check_cancelled(task_id):
+                    raise InterruptedError("任务已取消")
 
             whisper.extract_subtitle(
                 file_path,
@@ -194,13 +240,15 @@ class TaskWorker:
                 progress_callback
             )
 
+            TaskDAO.update_task(task_id, log="字幕提取完成", append_log=True)
             return str(srt_path)
 
         except Exception as e:
             TaskDAO.update_task(
                 task_id,
                 status=TaskStatus.FAILED,
-                log=f"提取失败: {str(e)[:100]}"
+                log=f"提取失败: {str(e)[:100]}",
+                append_log=True
             )
             return None
 
@@ -216,7 +264,7 @@ class TaskWorker:
         Returns:
             True 表示成功，False 表示失败（状态已在内部更新）
         """
-        TaskDAO.update_task(task_id, progress=50, log="准备翻译...")
+        TaskDAO.update_task(task_id, progress=50, log="准备翻译...", append_log=True)
 
         try:
             from services.translator import (
@@ -237,6 +285,7 @@ class TaskWorker:
 
             def progress_callback(current, total, message):
                 progress = 50 + int((current / total) * 45)
+                # 翻译进度高频更新，仅覆盖 log 不写历史
                 TaskDAO.update_task(task_id, progress=progress, log=message)
 
             success, msg = translate_srt_file(
@@ -250,10 +299,12 @@ class TaskWorker:
                     task_id,
                     status=TaskStatus.FAILED,
                     progress=100,
-                    log=f"翻译失败: {msg}"
+                    log=f"翻译失败: {msg}",
+                    append_log=True
                 )
                 return False
 
+            TaskDAO.update_task(task_id, log="翻译完成", append_log=True)
             return True
 
         except ImportError:
@@ -261,7 +312,8 @@ class TaskWorker:
                 task_id,
                 status=TaskStatus.FAILED,
                 progress=100,
-                log="翻译模块未安装"
+                log="翻译模块未安装",
+                append_log=True
             )
             return False
         except Exception as e:
@@ -269,7 +321,8 @@ class TaskWorker:
                 task_id,
                 status=TaskStatus.FAILED,
                 progress=100,
-                log=f"翻译异常: {str(e)[:100]}"
+                log=f"翻译异常: {str(e)[:100]}",
+                append_log=True
             )
             return False
 

@@ -5,12 +5,13 @@ Whisper 字幕提取服务
 负责从视频中提取字幕
 """
 
+import threading
 from pathlib import Path
 from typing import Optional, Callable
 from faster_whisper import WhisperModel
 
 from core.models import WhisperConfig, VADParameters
-from utils.format_utils import format_timestamp
+from utils.format_utils import format_timestamp, format_file_size
 
 
 class WhisperService:
@@ -35,11 +36,60 @@ class WhisperService:
         self.model_dir = model_dir
         self.model: Optional[WhisperModel] = None
     
-    def load_model(self):
-        """加载 Whisper 模型"""
+    def _is_model_cached(self) -> bool:
+        """检查模型文件是否已在本地缓存"""
+        model_dir = Path(self.model_dir)
+        # faster-whisper 在 download_root 下以模型名创建子目录
+        # 目录存在且非空则视为已缓存
+        for candidate in model_dir.glob(f"*{self.config.model_size}*"):
+            if candidate.is_dir() and any(candidate.iterdir()):
+                return True
+        return False
+
+    def load_model(
+        self,
+        progress_callback: Optional[Callable[[int, int, str], None]] = None
+    ):
+        """
+        加载 Whisper 模型
+
+        Args:
+            progress_callback: 进度回调 (current, total, message)，用于在下载时上报进度
+        """
         if self.model is not None:
             return
-        
+
+        is_cached = self._is_model_cached()
+
+        if not is_cached and progress_callback:
+            progress_callback(5, 100, f"首次使用，正在下载模型 {self.config.model_size}...")
+            # 启动后台线程轮询下载目录大小，定时上报进度
+            stop_event = threading.Event()
+            model_dir = Path(self.model_dir)
+
+            def _poll_download():
+                while not stop_event.is_set():
+                    try:
+                        total_size = sum(
+                            f.stat().st_size
+                            for f in model_dir.rglob('*')
+                            if f.is_file()
+                        )
+                        if total_size > 0:
+                            progress_callback(
+                                5, 100,
+                                f"正在下载模型 {self.config.model_size}... "
+                                f"已下载 {format_file_size(total_size)}"
+                            )
+                    except Exception:
+                        pass
+                    stop_event.wait(3)
+
+            poll_thread = threading.Thread(target=_poll_download, daemon=True)
+            poll_thread.start()
+        else:
+            stop_event = None
+
         try:
             self.model = WhisperModel(
                 self.config.model_size,
@@ -51,6 +101,9 @@ class WhisperService:
         except Exception as e:
             print(f"[WhisperService] Failed to load model: {e}")
             raise
+        finally:
+            if stop_event:
+                stop_event.set()
     
     def extract_subtitle(
         self,
@@ -69,9 +122,9 @@ class WhisperService:
         Returns:
             生成的 SRT 文件路径
         """
-        # 确保模型已加载
+        # 确保模型已加载（传入回调以支持下载进度上报）
         if self.model is None:
-            self.load_model()
+            self.load_model(progress_callback)
         
         # 确定输出路径
         if output_path is None:
