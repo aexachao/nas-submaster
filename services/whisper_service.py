@@ -20,7 +20,7 @@ class WhisperService:
         self,
         config: WhisperConfig,
         vad_params: VADParameters,
-        model_dir: str = "/data/models"
+        model_dir: str = "./data/models"
     ):
         """
         初始化 Whisper 服务
