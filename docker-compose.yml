@@ -30,6 +30,7 @@ services:
     environment:
       - TZ=Asia/Shanghai
       - PYTHONUNBUFFERED=1
+      - HF_ENDPOINT=https://hf-mirror.com
     shm_size: 4gb   # 限制最大使用4G内存，可根据需求修改或注释
     networks:
       - subtitle-network
