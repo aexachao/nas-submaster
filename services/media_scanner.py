@@ -197,10 +197,16 @@ class MediaScanner:
                     sub_name
                 )
 
-                # 判断来源：翻译字幕 vs 识别字幕
-                # 如果文件名包含目标语言代码后缀（如 .zh., .en.），认为是翻译字幕
-                is_translated = any(code in sub_name for code in target_lang_codes)
-                source = 'translated' if is_translated else 'asr'
+                # 判断来源：embedded > translated > asr
+                # .embedded. - 内置字幕
+                # .zh., .en. 等 - 翻译字幕
+                # 其他 - ASR 识别
+                if '.embedded.' in sub_name:
+                    source = 'embedded'
+                elif any(code in sub_name for code in target_lang_codes):
+                    source = 'translated'
+                else:
+                    source = 'asr'
 
                 subtitles.append(SubtitleInfo(
                     path=str(sub_path),

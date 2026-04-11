@@ -273,7 +273,8 @@ class TaskWorker:
             srt_path = SubtitleExtractor.extract_subtitle(
                 file_path,
                 best_track.stream_index,
-                output_format='srt'
+                output_format='srt',
+                embedded=True
             )
 
             if srt_path and Path(srt_path).exists():

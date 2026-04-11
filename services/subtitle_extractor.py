@@ -106,7 +106,8 @@ class SubtitleExtractor:
         video_path: str,
         track_index: int,
         output_path: Optional[str] = None,
-        output_format: str = 'srt'
+        output_format: str = 'srt',
+        embedded: bool = False
     ) -> Optional[str]:
         """
         提取指定轨道字幕
@@ -119,6 +120,7 @@ class SubtitleExtractor:
             track_index: 字幕轨道索引（从 0 开始）
             output_path: 输出文件路径，默认在视频同目录下生成
             output_format: 输出格式 (srt, ass, etc.)
+            embedded: 是否为内置字幕，True 时文件名加上 .embedded 标记
 
         Returns:
             提取后的文件路径，失败返回 None
@@ -126,7 +128,11 @@ class SubtitleExtractor:
         if output_path is None:
             video_dir = Path(video_path).parent
             video_stem = Path(video_path).stem
-            output_path = str(video_dir / f"{video_stem}.{output_format}")
+            # 内置字幕加上 embedded 标记，便于后续识别
+            if embedded:
+                output_path = str(video_dir / f"{video_stem}.embedded.{output_format}")
+            else:
+                output_path = str(video_dir / f"{video_stem}.{output_format}")
 
         try:
             cmd = [
