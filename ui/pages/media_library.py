@@ -112,6 +112,10 @@ def render_media_library_page(debug_mode: bool = False):
                         break
                     except ValueError:
                         continue
+
+            total_count = len(filtered_files)
+            start = current_page * page_size
+            page_files = filtered_files[start:start + page_size]
         else:
             # 全部文件
             filtered_files = MediaDAO.get_media_files_filtered(None)
