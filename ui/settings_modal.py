@@ -107,14 +107,14 @@ def render_settings_dialog():
     export_changes = {}
     prompt_changes = {}  # 提示词配置变更
 
-    # 创建 Tabs: 拆分 Whisper 设置 和 语音识别参数
-    tab_whisper, tab_params, tab_model, tab_trans, tab_export, tab_prompts = st.tabs([
+    # 创建 Tabs: 提示词设置放在语音识别参数后面
+    tab_whisper, tab_params, tab_prompts, tab_model, tab_trans, tab_export = st.tabs([
         "Whisper 设置",
         "语音识别参数",
+        "提示词设置",
         "翻译模型配置",
         "翻译设置",
-        "字幕格式",
-        "提示词设置"
+        "字幕格式"
     ])
     
     # 1. Whisper 设置 (硬件/模型)
@@ -190,173 +190,7 @@ def render_settings_dialog():
         )
         whisper_changes['source_language'] = source_lang
 
-    # 2. 翻译模型配置
-    with tab_model:
-        st.subheader("LLM 服务商配置")
-        
-        # 服务商选择
-        provider_keys = list(LLM_PROVIDERS.keys())
-        try:
-            default_prov_idx = provider_keys.index(config.current_provider)
-        except ValueError:
-            default_prov_idx = 0
-            
-        def on_provider_change():
-            st.session_state._settings_provider_changed = True
-            
-        provider = st.selectbox(
-            "选择 AI 服务商",
-            provider_keys,
-            index=default_prov_idx,
-            key="settings_provider_select",
-            on_change=on_provider_change
-        )
-        model_changes['provider'] = provider
-        
-        # 获取配置
-        provider_cfg = config.provider_configs.get(provider)
-        if not provider_cfg:
-            default = LLM_PROVIDERS.get(provider, {})
-            from core.models import ProviderConfig
-            provider_cfg = ProviderConfig(
-                api_key='',
-                base_url=default.get('base_url', ''),
-                model_name=default.get('model', '')
-            )
-            
-        # 清除标记
-        if '_settings_provider_changed' in st.session_state:
-            del st.session_state['_settings_provider_changed']
-            
-        st.markdown("<br>", unsafe_allow_html=True)
-        
-        # Base URL
-        base_url = st.text_input(
-            "Base URL",
-            value=provider_cfg.base_url,
-            help="API 请求地址",
-            key=f"set_base_{provider}"
-        )
-        model_changes['base_url'] = base_url
-        
-        # Model Name & API Key
-        if "Ollama" in provider:
-            col_m1, col_m2 = st.columns([3, 1], vertical_alignment="bottom")
-            with col_m1:
-                ollama_models = fetch_ollama_models(base_url)
-                if ollama_models:
-                    try:
-                        m_idx = ollama_models.index(provider_cfg.model_name)
-                    except ValueError:
-                        m_idx = 0
-                    model_name = st.selectbox("选择模型", ollama_models, index=m_idx, key=f"set_model_{provider}")
-                else:
-                    st.warning("未检测到模型，请确保 Ollama 正在运行")
-                    model_name = st.text_input("模型名称 (手动)", value=provider_cfg.model_name, key=f"set_model_man_{provider}")
-            with col_m2:
-                if st.button("刷新", key=f"set_ref_{provider}", use_container_width=True):
-                    # 触发页面重新渲染，fetch_ollama_models 会重新请求
-                    st.toast("模型列表已刷新")
-                    st.rerun()
-            api_key = ""
-        else:
-            model_name = st.text_input("模型名称", value=provider_cfg.model_name, key=f"set_model_{provider}")
-            api_key = st.text_input(
-                "API Key",
-                value=provider_cfg.api_key,
-                type="password",
-                key=f"set_key_{provider}"
-            )
-            
-        model_changes['model_name'] = model_name
-        model_changes['api_key'] = api_key
-        
-        # 仅第三方模型显示测试连接按钮
-        if "Ollama" not in provider:
-            st.markdown("<br>", unsafe_allow_html=True)
-            if st.button("测试连接", use_container_width=True):
-                if not api_key:
-                    st.warning("请先填写 API Key")
-                elif not model_name:
-                    st.warning("请先填写模型名称")
-                else:
-                    with st.spinner("连接测试中..."):
-                        ok, msg = test_api_connection(api_key, base_url, model_name)
-                        if ok:
-                            st.toast("连接成功！")
-                        else:
-                            st.error(f"连接失败: {msg}")
-
-    # 3. 翻译设置
-    with tab_trans:
-        st.subheader("翻译流程控制")
-        
-        enable_trans = st.toggle("启用翻译功能", value=config.translation.enabled)
-        trans_changes['enable_translation'] = enable_trans
-        
-        st.markdown("<br>", unsafe_allow_html=True)
-        
-        target_lang = st.selectbox(
-            "目标语言",
-            TARGET_LANG_OPTIONS,
-            format_func=lambda x: ISO_LANG_MAP.get(x, x),
-            index=TARGET_LANG_OPTIONS.index(config.translation.target_language)
-        )
-        trans_changes['target_language'] = target_lang
-        
-        batch_size = st.number_input(
-            "批处理行数 (长视频分批翻译)",
-            min_value=50, max_value=5000, step=50,
-            value=config.translation.max_lines_per_batch
-        )
-        trans_changes['max_lines_per_batch'] = batch_size
-
-    # 4. 字幕格式
-    with tab_export:
-        st.subheader("导出格式选择")
-        st.caption("选择生成的字幕文件格式（可多选）")
-        st.markdown("<br>", unsafe_allow_html=True)
-        
-        export_formats = config.export.formats
-        new_formats = []
-        
-        col_e1, col_e2 = st.columns(2)
-        with col_e1:
-            # SRT
-            if st.checkbox("SRT", value='srt' in export_formats): 
-                new_formats.append('srt')
-            st.caption("最通用，几乎所有播放器支持")
-            st.markdown("<div style='height: 10px'></div>", unsafe_allow_html=True)
-            
-            # VTT
-            if st.checkbox("VTT", value='vtt' in export_formats): 
-                new_formats.append('vtt')
-            st.caption("Web/HTML5 播放器专用")
-            st.markdown("<div style='height: 10px'></div>", unsafe_allow_html=True)
-            
-            # ASS
-            if st.checkbox("ASS", value='ass' in export_formats): 
-                new_formats.append('ass')
-            st.caption("支持丰富样式，动漫字幕常用")
-            
-        with col_e2:
-            # SSA
-            if st.checkbox("SSA", value='ssa' in export_formats): 
-                new_formats.append('ssa')
-            st.caption("ASS 的前身，兼容性更好")
-            st.markdown("<div style='height: 10px'></div>", unsafe_allow_html=True)
-            
-            # SUB
-            if st.checkbox("SUB", value='sub' in export_formats): 
-                new_formats.append('sub')
-            st.caption("老式 DVD 播放器支持")
-            
-        if not new_formats:
-            new_formats = ['srt'] # default fallback
-            
-        export_changes['export_formats'] = new_formats
-
-    # 6. 提示词设置
+    # 3. 提示词设置
     with tab_prompts:
         st.subheader("翻译提示词配置")
         st.caption("为不同内容类型配置专属的翻译提示词，提升翻译质量")
@@ -432,6 +266,172 @@ def render_settings_dialog():
                         st.session_state[f"prompt_style_{ct.value}"] = default_tpl.style_guide if default_tpl else ""
                         st.toast(f"已重置为 {content_type_tab_names[idx]} 默认提示词")
                         st.rerun()
+
+    # 4. 翻译模型配置
+    with tab_model:
+        st.subheader("LLM 服务商配置")
+
+        # 服务商选择
+        provider_keys = list(LLM_PROVIDERS.keys())
+        try:
+            default_prov_idx = provider_keys.index(config.current_provider)
+        except ValueError:
+            default_prov_idx = 0
+
+        def on_provider_change():
+            st.session_state._settings_provider_changed = True
+
+        provider = st.selectbox(
+            "选择 AI 服务商",
+            provider_keys,
+            index=default_prov_idx,
+            key="settings_provider_select",
+            on_change=on_provider_change
+        )
+        model_changes['provider'] = provider
+
+        # 获取配置
+        provider_cfg = config.provider_configs.get(provider)
+        if not provider_cfg:
+            default = LLM_PROVIDERS.get(provider, {})
+            from core.models import ProviderConfig
+            provider_cfg = ProviderConfig(
+                api_key='',
+                base_url=default.get('base_url', ''),
+                model_name=default.get('model', '')
+            )
+
+        # 清除标记
+        if '_settings_provider_changed' in st.session_state:
+            del st.session_state['_settings_provider_changed']
+
+        st.markdown("<br>", unsafe_allow_html=True)
+
+        # Base URL
+        base_url = st.text_input(
+            "Base URL",
+            value=provider_cfg.base_url,
+            help="API 请求地址",
+            key=f"set_base_{provider}"
+        )
+        model_changes['base_url'] = base_url
+
+        # Model Name & API Key
+        if "Ollama" in provider:
+            col_m1, col_m2 = st.columns([3, 1], vertical_alignment="bottom")
+            with col_m1:
+                ollama_models = fetch_ollama_models(base_url)
+                if ollama_models:
+                    try:
+                        m_idx = ollama_models.index(provider_cfg.model_name)
+                    except ValueError:
+                        m_idx = 0
+                    model_name = st.selectbox("选择模型", ollama_models, index=m_idx, key=f"set_model_{provider}")
+                else:
+                    st.warning("未检测到模型，请确保 Ollama 正在运行")
+                    model_name = st.text_input("模型名称 (手动)", value=provider_cfg.model_name, key=f"set_model_man_{provider}")
+            with col_m2:
+                if st.button("刷新", key=f"set_ref_{provider}", use_container_width=True):
+                    # 触发页面重新渲染，fetch_ollama_models 会重新请求
+                    st.toast("模型列表已刷新")
+                    st.rerun()
+            api_key = ""
+        else:
+            model_name = st.text_input("模型名称", value=provider_cfg.model_name, key=f"set_model_{provider}")
+            api_key = st.text_input(
+                "API Key",
+                value=provider_cfg.api_key,
+                type="password",
+                key=f"set_key_{provider}"
+            )
+
+        model_changes['model_name'] = model_name
+        model_changes['api_key'] = api_key
+
+        # 仅第三方模型显示测试连接按钮
+        if "Ollama" not in provider:
+            st.markdown("<br>", unsafe_allow_html=True)
+            if st.button("测试连接", use_container_width=True):
+                if not api_key:
+                    st.warning("请先填写 API Key")
+                elif not model_name:
+                    st.warning("请先填写模型名称")
+                else:
+                    with st.spinner("连接测试中..."):
+                        ok, msg = test_api_connection(api_key, base_url, model_name)
+                        if ok:
+                            st.toast("连接成功！")
+                        else:
+                            st.error(f"连接失败: {msg}")
+
+    # 5. 翻译设置
+    with tab_trans:
+        st.subheader("翻译流程控制")
+        
+        enable_trans = st.toggle("启用翻译功能", value=config.translation.enabled)
+        trans_changes['enable_translation'] = enable_trans
+        
+        st.markdown("<br>", unsafe_allow_html=True)
+        
+        target_lang = st.selectbox(
+            "目标语言",
+            TARGET_LANG_OPTIONS,
+            format_func=lambda x: ISO_LANG_MAP.get(x, x),
+            index=TARGET_LANG_OPTIONS.index(config.translation.target_language)
+        )
+        trans_changes['target_language'] = target_lang
+        
+        batch_size = st.number_input(
+            "批处理行数 (长视频分批翻译)",
+            min_value=50, max_value=5000, step=50,
+            value=config.translation.max_lines_per_batch
+        )
+        trans_changes['max_lines_per_batch'] = batch_size
+
+    # 6. 字幕格式
+    with tab_export:
+        st.subheader("导出格式选择")
+        st.caption("选择生成的字幕文件格式（可多选）")
+        st.markdown("<br>", unsafe_allow_html=True)
+        
+        export_formats = config.export.formats
+        new_formats = []
+        
+        col_e1, col_e2 = st.columns(2)
+        with col_e1:
+            # SRT
+            if st.checkbox("SRT", value='srt' in export_formats): 
+                new_formats.append('srt')
+            st.caption("最通用，几乎所有播放器支持")
+            st.markdown("<div style='height: 10px'></div>", unsafe_allow_html=True)
+            
+            # VTT
+            if st.checkbox("VTT", value='vtt' in export_formats): 
+                new_formats.append('vtt')
+            st.caption("Web/HTML5 播放器专用")
+            st.markdown("<div style='height: 10px'></div>", unsafe_allow_html=True)
+            
+            # ASS
+            if st.checkbox("ASS", value='ass' in export_formats): 
+                new_formats.append('ass')
+            st.caption("支持丰富样式，动漫字幕常用")
+            
+        with col_e2:
+            # SSA
+            if st.checkbox("SSA", value='ssa' in export_formats): 
+                new_formats.append('ssa')
+            st.caption("ASS 的前身，兼容性更好")
+            st.markdown("<div style='height: 10px'></div>", unsafe_allow_html=True)
+            
+            # SUB
+            if st.checkbox("SUB", value='sub' in export_formats): 
+                new_formats.append('sub')
+            st.caption("老式 DVD 播放器支持")
+            
+        if not new_formats:
+            new_formats = ['srt'] # default fallback
+            
+        export_changes['export_formats'] = new_formats
 
     st.markdown("---")
 
