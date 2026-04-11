@@ -361,15 +361,16 @@ def render_settings_dialog():
         st.subheader("翻译提示词配置")
         st.caption("为不同内容类型配置专属的翻译提示词，提升翻译质量")
 
-        # 内容类型子 Tab（不包含 CUSTOM，翻译提示词不需要）
-        content_type_tab_names = ["电影", "纪录片", "综艺", "动画", "讲座", "音乐"]
+        # 内容类型子 Tab（包含 CUSTOM，用于用户自定义提示词）
+        content_type_tab_names = ["电影", "纪录片", "综艺", "动画", "讲座", "音乐", "自定义"]
         content_type_keys = [
             ContentType.MOVIE,
             ContentType.DOCUMENTARY,
             ContentType.VARIETY,
             ContentType.ANIMATION,
             ContentType.LECTURE,
-            ContentType.MUSIC
+            ContentType.MUSIC,
+            ContentType.CUSTOM
         ]
 
         tabs_prompt_content = st.tabs(content_type_tab_names)
