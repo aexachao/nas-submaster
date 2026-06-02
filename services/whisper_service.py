@@ -5,6 +5,7 @@ Whisper 字幕提取服务
 负责从视频中提取字幕
 """
 
+import os
 import threading
 from pathlib import Path
 from typing import Optional, Callable
@@ -12,6 +13,10 @@ from faster_whisper import WhisperModel
 
 from core.models import WhisperConfig, VADParameters
 from utils.format_utils import format_timestamp, format_file_size
+
+
+# CUDA/cuBLAS 相关错误的特征子串，用于判断是否需要回退到 CPU
+_CUDA_ERROR_MARKERS = ("libcublas", "cuda", "cudnn")
 
 
 class WhisperService:
@@ -46,12 +51,30 @@ class WhisperService:
                 return True
         return False
 
+    def _resolve_device(self) -> str:
+        """解析实际使用的 device：WHISPER_DEVICE 环境变量优先于 config.whisper.device。"""
+        env_device = os.environ.get("WHISPER_DEVICE")
+        if env_device and env_device.strip():
+            return env_device.strip()
+        return self.config.device
+
+    @staticmethod
+    def _is_cuda_error(exc: Exception) -> bool:
+        """判断异常是否与 CUDA/cuBLAS 库加载失败相关（用于决定是否回退 CPU）。"""
+        msg = str(exc).lower()
+        return any(marker in msg for marker in _CUDA_ERROR_MARKERS)
+
     def load_model(
         self,
         progress_callback: Optional[Callable[[int, int, str], None]] = None
     ):
         """
         加载 Whisper 模型
+
+        行为：
+        - device="auto"：先尝试 cuda，CUDA/cuBLAS 不可用时回退到 cpu
+        - device="cuda" / "cpu"：显式指定，不静默回退，错误原样抛出
+        - WHISPER_DEVICE 环境变量覆盖 config.whisper.device
 
         Args:
             progress_callback: 进度回调 (current, total, message)，用于在下载时上报进度
@@ -90,14 +113,43 @@ class WhisperService:
         else:
             stop_event = None
 
-        try:
-            self.model = WhisperModel(
+        # 决定本次加载的 device：env 优先；'auto' 表示先试 cuda 再回退 cpu
+        device = self._resolve_device()
+        compute_type = self.config.compute_type
+
+        def _do_load(dev: str, ct: str):
+            return WhisperModel(
                 self.config.model_size,
-                device=self.config.device,
-                compute_type=self.config.compute_type,
+                device=dev,
+                compute_type=ct,
                 download_root=self.model_dir
             )
-            print(f"[WhisperService] Model loaded: {self.config.model_size}")
+
+        try:
+            if device == "auto":
+                # auto：先尝试 cuda，失败（CUDA/cuBLAS 不可用）回退到 cpu
+                try:
+                    self.model = _do_load("cuda", compute_type)
+                    print(
+                        f"[WhisperService] Model loaded: "
+                        f"{self.config.model_size} (device=cuda)"
+                    )
+                except Exception as e:
+                    if self._is_cuda_error(e):
+                        print(
+                            f"[WhisperService] CUDA 不可用 ({e})，回退到 CPU"
+                        )
+                        self.model = _do_load("cpu", compute_type)
+                        print(
+                            f"[WhisperService] Model loaded: "
+                            f"{self.config.model_size} (device=cpu)"
+                        )
+                    else:
+                        raise
+            else:
+                # 显式 cuda / cpu：不静默回退，错误原样向上抛
+                self.model = _do_load(device, compute_type)
+                print(f"[WhisperService] Model loaded: {self.config.model_size}")
         except Exception as e:
             print(f"[WhisperService] Failed to load model: {e}")
             raise

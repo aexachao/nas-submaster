@@ -168,6 +168,32 @@ nas-submaster/
     * **DeepSeek**：推荐用于高性价比翻译。
     * **Ollama**：推荐 `qwen2.5` 模型用于本地离线翻译。
 
+### 4. 启用 GPU 加速（可选）
+
+镜像基于 `nvidia/cuda:12.4.1-cudnn-runtime`，**已内置** `libcublas.so.12`，无需在宿主机挂载 NVIDIA 驱动目录即可启用 GPU。
+
+**步骤**：
+
+1. **宿主机准备**（一次性）：
+   * Linux 服务器/桌面：安装 [nvidia-container-toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html)
+   * **威联通 QTS Hero**：在 App Center 搜索安装 `Container Station GPU Driver` 套件
+   * **群晖 DSM**：在 Package Center 装 `GPU Driver` 套件
+   * **Unraid**：在 Community Applications 装 `nvidia-driver` 插件
+
+2. **修改 `docker-compose.yml`**，取消 `nas-subtitle` 服务下两处注释：
+   * `environment` 中的 `NVIDIA_VISIBLE_DEVICES` 和 `NVIDIA_DRIVER_CAPABILITIES` 两行
+   * `deploy.resources` 下的 `reservations.devices` 整段
+
+3. **重启**：`docker compose up -d`
+
+启动后 `WHISPER_DEVICE=auto` 会自动尝试 CUDA；遇到驱动/库问题（如 libcublas 缺失）会**自动回退到 CPU**，不会让任务崩溃。
+
+**验证 GPU 是否生效**：
+```bash
+docker exec nas-submaster python -c "import ctranslate2; print('CUDA 设备数:', ctranslate2.get_cuda_device_count())"
+# 输出 >= 1 表示 GPU 已被容器识别
+```
+
 ---
 
 ## 🤝 常见问题 (FAQ)
@@ -180,6 +206,9 @@ A: 本次重构优化了数据库结构，旧版 `data/database.db` 可能无法
 
 **Q: 如何查看报错日志？**
 A: 可以通过 `docker logs -f nas-subtitle` 查看后端详细运行日志。
+
+**Q: 报 `Library libcublas.so.12 is not found` 怎么办？**
+A: 拉取最新镜像（`docker compose pull`）即可。最新镜像基于 `nvidia/cuda` 构建，cuBLAS 库已内置。日志中如果出现 `CUDA 不可用，自动回退到 CPU` 是正常行为，说明 GPU 暂时不可用但任务仍能继续。如需强制 GPU，请检查宿主机 `nvidia-container-toolkit` 是否安装正确（参见上方"启用 GPU 加速"章节）。
 
 ---
 
