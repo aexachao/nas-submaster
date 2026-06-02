@@ -1,23 +1,4 @@
 services:
-  ollama:
-    image: ollama/ollama:latest
-    container_name: ollama
-    restart: unless-stopped
-    ports:
-      - "11434:11434"
-    volumes:
-      - ./ollama_data:/root/.ollama
-    shm_size: 4gb            # 限制最大使用4G内存，可根据需求修改或注释
-    networks:
-      - subtitle-network
-    cpuset: "0-4"           # 绑定核心数，可根据需求修改或注释
-    environment:
-      - TZ=Asia/Shanghai  # 添加这行
-    deploy:                # 最多使用核心数，可根据需求修改或注释
-      resources:
-        limits:
-          cpus: '5.0'
-
   nas-subtitle:
     build: .
     container_name: nas-submaster
@@ -31,29 +12,11 @@ services:
       - TZ=Asia/Shanghai
       - PYTHONUNBUFFERED=1
       - HF_ENDPOINT=https://hf-mirror.com
-      # Whisper 设备选择：auto = 优先 GPU，CUDA 不可用时回退 CPU；也可填 cpu / cuda
+      # Whisper 设备：auto = 优先 GPU，CUDA 不可用时回退 CPU；也可填 cpu / cuda
       - WHISPER_DEVICE=auto
-      # ============ 启用 GPU 时取消下面两行注释 ============
-      # 需要同时取消下面 deploy.resources.reservations.devices 块的注释
-      # - NVIDIA_VISIBLE_DEVICES=all
-      # - NVIDIA_DRIVER_CAPABILITIES=compute,utility
-    shm_size: 4gb   # 限制最大使用4G内存，可根据需求修改或注释
+    shm_size: 4gb
     networks:
       - subtitle-network
-    depends_on:
-      - ollama
-    cpuset: "0-4"  # 绑定核心数，可根据需求修改或注释
-    deploy:         # 最多使用核心数，可根据需求修改或注释
-      resources:
-        limits:
-          cpus: '5.0'
-      # ============ 启用 GPU 时取消下面整段注释 ============
-      # 同时取消上方 environment 中 NVIDIA_* 两行的注释
-      # reservations:
-      #   devices:
-      #     - driver: nvidia
-      #       count: all
-      #       capabilities: [gpu]
 
 networks:
   subtitle-network:

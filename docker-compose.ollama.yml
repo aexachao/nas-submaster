@@ -1,0 +1,17 @@
+# 本地 LLM 翻译服务（可选）
+# 用法：docker compose -f docker-compose.yml -f docker-compose.ollama.yml up -d
+# 启动后，在 Web 设置界面选 "Ollama (本地模型)"，base_url 填 http://ollama:11434/v1
+services:
+  ollama:
+    image: ollama/ollama:latest
+    container_name: ollama
+    restart: unless-stopped
+    ports:
+      - "11434:11434"
+    volumes:
+      - ./ollama_data:/root/.ollama
+    shm_size: 4gb
+    networks:
+      - subtitle-network
+    environment:
+      - TZ=Asia/Shanghai

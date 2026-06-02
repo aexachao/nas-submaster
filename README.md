@@ -46,47 +46,37 @@ NAS SubMaster (NAS 字幕管家)
 
 ---
 
-## 🚀 部署方式 (二选一)
+## 🚀 部署方式
+
+### 仓库里的 compose 文件说明
+
+| 文件 | 用途 |
+|---|---|
+| `docker-compose.yml` | **唯一必选**，包含 `nas-subtitle` 服务 |
+| `docker-compose.ollama.yml` | 可选叠加，添加本地 Ollama 翻译服务 |
 
 ### 方案一：使用 Docker Hub 镜像 (推荐)
 
-1.  在 NAS 上创建一个文件夹（例如 `nas-subtitle`）。
-2.  在该目录下创建 `docker-compose.yml` 文件：
+1. 在 NAS 上创建一个文件夹（例如 `nas-subtitle`）。
+2. 把仓库里的 `docker-compose.yml` 复制到该目录，**修改视频路径**：
+   ```yaml
+   volumes:
+     - ./data:/data
+     - /your/media/path:/media/movies   # ← 改这里
+   ```
+3. 启动：
+   ```bash
+   docker compose up -d
+   ```
+4. 浏览器访问 `http://NAS_IP:8501`，首次进入"设置"页配置翻译 API（DeepSeek / OpenAI / Gemini 等任选）。
 
-```yaml
-version: '3.8'
-
-services:
-  nas-subtitle:
-    image: aexachao/nas-subtitle-manager:latest
-    container_name: nas-submaster
-    restart: unless-stopped
-    ports:
-      - "8501:8501"
-    volumes:
-      - ./data:/data                       # 数据库、配置和模型持久化目录
-      - /volume1/video:/media              # ⚠️ 视频根目录，映射后可在 Web 端选择具体子目录
-    environment:
-      - TZ=Asia/Shanghai
-    extra_hosts:
-      - "host.docker.internal:host-gateway" # 允许容器访问宿主机上的 Ollama
-
-  # (可选) 本地大模型服务
-  ollama:
-    image: ollama/ollama:latest
-    container_name: ollama
-    restart: unless-stopped
-    ports:
-      - "11434:11434"
-    volumes:
-      - ./ollama_data:/root/.ollama
-```
-
-3.  启动服务：
+**默认行为**：不启用本地 Ollama，需要本地翻译时叠加：
 
 ```bash
-docker compose up -d
+docker compose -f docker-compose.yml -f docker-compose.ollama.yml up -d
 ```
+
+在 Web 设置界面选 "Ollama (本地模型)"，base_url 填 `http://ollama:11434/v1`，模型名填 `qwen2.5:7b`（或你 pull 过的任意模型）。
 
 ---
 
@@ -125,7 +115,10 @@ nas-submaster/
 │   ├── media_dao.py
 │   └── task_dao.py
 ├── Dockerfile
+├── docker-compose.yml
+├── docker-compose.ollama.yml
 ├── requirements.txt
+├── requirements-test.txt
 ├── services
 │   ├── media_scanner.py
 │   ├── subtitle_converter.py
@@ -180,9 +173,24 @@ nas-submaster/
    * **群晖 DSM**：在 Package Center 装 `GPU Driver` 套件
    * **Unraid**：在 Community Applications 装 `nvidia-driver` 插件
 
-2. **修改 `docker-compose.yml`**，取消 `nas-subtitle` 服务下两处注释：
-   * `environment` 中的 `NVIDIA_VISIBLE_DEVICES` 和 `NVIDIA_DRIVER_CAPABILITIES` 两行
-   * `deploy.resources` 下的 `reservations.devices` 整段
+2. **修改 `docker-compose.yml`**，给 `nas-subtitle` 服务加两段配置：
+
+   `environment` 下追加：
+   ```yaml
+   - NVIDIA_VISIBLE_DEVICES=all
+   - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+   ```
+
+   新增 `deploy` 块（与文件末尾 `networks` 同级）：
+   ```yaml
+   deploy:
+     resources:
+       reservations:
+         devices:
+           - driver: nvidia
+             count: all
+             capabilities: [gpu]
+   ```
 
 3. **重启**：`docker compose up -d`
 
