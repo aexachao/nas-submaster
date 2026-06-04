@@ -202,6 +202,10 @@ class AppConfig:
     # 各内容类型的翻译提示词模板
     prompt_templates: Dict[ContentType, PromptTemplate] = field(default_factory=dict)
 
+    # 自动扫描配置
+    auto_scan_enabled: bool = False
+    auto_scan_interval_minutes: int = 30
+
     def get_vad_parameters(self) -> VADParameters:
         """获取当前内容类型的 VAD 参数"""
         return VAD_PRESETS.get(self.content_type, VAD_PRESETS[ContentType.MOVIE])
@@ -254,7 +258,9 @@ class AppConfig:
             },
             'prompt_templates': {
                 k.value: v.to_dict() for k, v in self.prompt_templates.items()
-            }
+            },
+            'auto_scan_enabled': self.auto_scan_enabled,
+            'auto_scan_interval_minutes': self.auto_scan_interval_minutes
         }
     
     @classmethod
@@ -303,7 +309,9 @@ class AppConfig:
             content_type=content_type,
             current_provider=data.get('current_provider', 'Ollama (本地模型)'),
             provider_configs=provider_configs,
-            prompt_templates=prompt_templates
+            prompt_templates=prompt_templates,
+            auto_scan_enabled=data.get('auto_scan_enabled', False),
+            auto_scan_interval_minutes=data.get('auto_scan_interval_minutes', 30)
         )
 
 
@@ -354,7 +362,9 @@ class ConfigManager:
                 'content_type': config_dict.get('content_type', 'movie'),
                 'current_provider': config_dict.get('current_provider', 'Ollama (本地模型)'),
                 'provider_configs': json.loads(config_dict.get('provider_configs', '{}')),
-                'prompt_templates': json.loads(config_dict.get('prompt_templates', '{}'))
+                'prompt_templates': json.loads(config_dict.get('prompt_templates', '{}')),
+                'auto_scan_enabled': config_dict.get('auto_scan_enabled', 'false') == 'true',
+                'auto_scan_interval_minutes': int(config_dict.get('auto_scan_interval_minutes', 30))
             }
             
             # ✅ 修改：加载完成后更新缓存
@@ -400,7 +410,9 @@ class ConfigManager:
                 'prompt_templates': json.dumps(
                     {k.value: v.to_dict() for k, v in config.prompt_templates.items()},
                     ensure_ascii=False
-                )
+                ),
+                'auto_scan_enabled': 'true' if config.auto_scan_enabled else 'false',
+                'auto_scan_interval_minutes': str(config.auto_scan_interval_minutes)
             }
             
             for key, value in flat_config.items():

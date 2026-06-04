@@ -107,15 +107,17 @@ def render_settings_dialog():
     trans_changes = {}
     export_changes = {}
     prompt_changes = {}  # 提示词配置变更
+    scan_changes = {}  # 自动扫描配置变更
 
     # 创建 Tabs: 提示词设置放在语音识别参数后面
-    tab_whisper, tab_params, tab_prompts, tab_model, tab_trans, tab_export = st.tabs([
+    tab_whisper, tab_params, tab_prompts, tab_model, tab_trans, tab_export, tab_scan = st.tabs([
         "Whisper 设置",
         "语音识别参数",
         "提示词设置",
         "翻译模型配置",
         "翻译设置",
-        "字幕格式"
+        "字幕格式",
+        "自动扫描"
     ])
     
     # 1. Whisper 设置 (硬件/模型)
@@ -445,15 +447,47 @@ def render_settings_dialog():
             
         export_changes['export_formats'] = new_formats
 
+    # 7. 自动扫描
+    with tab_scan:
+        st.subheader("媒体库自动扫描")
+        st.caption("定时扫描媒体目录，自动发现新增和删除的文件")
+
+        auto_scan = st.toggle(
+            "启用自动扫描",
+            value=config.auto_scan_enabled,
+            help="开启后，后台 Worker 会按设定间隔自动扫描媒体目录"
+        )
+        scan_changes['auto_scan_enabled'] = auto_scan
+
+        st.markdown("<br>", unsafe_allow_html=True)
+
+        interval_options = [5, 15, 30, 60]
+        current_interval = config.auto_scan_interval_minutes
+        if current_interval not in interval_options:
+            current_interval = 30
+
+        interval = st.selectbox(
+            "扫描间隔",
+            interval_options,
+            index=interval_options.index(current_interval),
+            format_func=lambda x: f"{x} 分钟",
+            disabled=not auto_scan,
+            help="自动扫描的时间间隔"
+        )
+        scan_changes['auto_scan_interval_minutes'] = interval
+
+        if auto_scan:
+            st.info(f"每 {interval} 分钟自动扫描一次媒体目录，新文件会自动出现在媒体库中")
+
     st.markdown("---")
 
     # 底部保存按钮
     if st.button("保存所有设置", type="primary", use_container_width=True):
-        _save_full_config(config_manager, whisper_changes, model_changes, trans_changes, export_changes, prompt_changes)
+        _save_full_config(config_manager, whisper_changes, model_changes, trans_changes, export_changes, prompt_changes, scan_changes)
         st.rerun()
 
 
-def _save_full_config(mgr, w_changes, m_changes, t_changes, e_changes, p_changes):
+def _save_full_config(mgr, w_changes, m_changes, t_changes, e_changes, p_changes, s_changes=None):
     """保存逻辑"""
     config = mgr.load()
 
@@ -484,6 +518,11 @@ def _save_full_config(mgr, w_changes, m_changes, t_changes, e_changes, p_changes
     # Prompt Templates
     if 'prompt_templates' in p_changes:
         config.prompt_templates = p_changes['prompt_templates']
+
+    # Auto Scan
+    if s_changes:
+        config.auto_scan_enabled = s_changes.get('auto_scan_enabled', False)
+        config.auto_scan_interval_minutes = s_changes.get('auto_scan_interval_minutes', 30)
 
     # Save
     if mgr.save(config):

@@ -15,7 +15,7 @@ from core.models import TaskStatus
 from core.config import AppConfig, ConfigManager
 from database.connection import wait_for_database, get_db_connection
 from database.task_dao import TaskDAO
-from services.media_scanner import rescan_video_subtitles
+from services.media_scanner import rescan_video_subtitles, scan_media_directory
 from services.whisper_service import WhisperService
 
 
@@ -31,6 +31,8 @@ class TaskWorker:
         self._whisper_config_key: Optional[str] = None
         # 取消标志：Worker 轮询此事件，设置后当前任务尽快退出
         self._cancel_event = threading.Event()
+        # 自动扫描：上次扫描时间戳
+        self._last_scan_time: float = 0
 
     def start(self):
         """启动处理器（在独立线程中运行）"""
@@ -88,7 +90,14 @@ class TaskWorker:
                     print(f"[TaskWorker] Processing task {task.id}: {task.file_path}")
                     self._process_task(task.id, task.file_path, config)
                 else:
-                    # 无任务时休眠
+                    # 无任务时：检查是否需要自动扫描
+                    if config.auto_scan_enabled:
+                        interval_sec = config.auto_scan_interval_minutes * 60
+                        if time.time() - self._last_scan_time >= interval_sec:
+                            print("[TaskWorker] Auto-scanning media library...")
+                            scan_media_directory()
+                            self._last_scan_time = time.time()
+                    # 休眠
                     time.sleep(5)
 
             except Exception as e:

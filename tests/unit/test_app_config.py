@@ -177,6 +177,24 @@ class TestAppConfigSerialization:
         config = AppConfig.from_dict(data)
         assert config.content_type == ContentType.MOVIE
 
+    def test_auto_scan_defaults(self):
+        config = AppConfig()
+        assert config.auto_scan_enabled is False
+        assert config.auto_scan_interval_minutes == 30
+
+    def test_auto_scan_round_trip(self):
+        config = AppConfig(auto_scan_enabled=True, auto_scan_interval_minutes=15)
+        d = config.to_dict()
+        restored = AppConfig.from_dict(d)
+        assert restored.auto_scan_enabled is True
+        assert restored.auto_scan_interval_minutes == 15
+
+    def test_auto_scan_from_dict_missing_keys_use_defaults(self):
+        data = {}
+        config = AppConfig.from_dict(data)
+        assert config.auto_scan_enabled is False
+        assert config.auto_scan_interval_minutes == 30
+
 
 # ============================================================================
 # get_content_type_display_name / description
