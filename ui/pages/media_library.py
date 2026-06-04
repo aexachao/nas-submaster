@@ -31,10 +31,7 @@ def render_media_library_page(debug_mode: bool = False):
     """渲染媒体库页面"""
 
     # 计算当前已选中文件数（在列定义之前，供批量删除/开始按钮使用）
-    selected_count = sum(
-        1 for k, v in st.session_state.items()
-        if isinstance(k, str) and k.startswith('s_') and v is True
-    )
+    selected_count = get_selected_count()
 
     # 顶部工具栏
     # 比例: 筛选(2.2) | 空白(0.8) | 目录选择(3) | 扫描(0.8) | 删除(0.8) | 开始(0.8)
@@ -336,6 +333,19 @@ def _delete_selected_files():
 
     time.sleep(1)
     st.rerun()
+
+
+def get_selected_count() -> int:
+    """
+    计算 session_state 中已勾选的文件数量
+
+    Returns:
+        已选中的文件数（勾选的 s_<id> 键的数量）
+    """
+    return sum(
+        1 for k, v in st.session_state.items()
+        if isinstance(k, str) and k.startswith('s_') and v is True
+    )
 
 
 def _filter_files_by_subtitle_status(files, filter_type: str):
