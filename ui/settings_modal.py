@@ -109,15 +109,16 @@ def render_settings_dialog():
     prompt_changes = {}  # 提示词配置变更
     scan_changes = {}  # 自动扫描配置变更
 
-    # 创建 Tabs: 提示词设置放在语音识别参数后面
-    tab_whisper, tab_params, tab_prompts, tab_model, tab_trans, tab_export, tab_scan = st.tabs([
+    # 创建 Tabs
+    tab_whisper, tab_params, tab_prompts, tab_model, tab_trans, tab_export, tab_scan, tab_about = st.tabs([
         "Whisper 设置",
         "语音识别参数",
         "提示词设置",
         "翻译模型配置",
         "翻译设置",
         "字幕格式",
-        "自动扫描"
+        "自动扫描",
+        "关于"
     ])
     
     # 1. Whisper 设置 (硬件/模型)
@@ -283,6 +284,8 @@ def render_settings_dialog():
 
         def on_provider_change():
             st.session_state._settings_provider_changed = True
+            # 切换服务商时清除测试结果
+            st.session_state.pop('_test_conn_result', None)
 
         provider = st.selectbox(
             "选择 AI 服务商",
@@ -382,16 +385,26 @@ def render_settings_dialog():
             st.markdown("<br>", unsafe_allow_html=True)
             if st.button("测试连接", use_container_width=True):
                 if not api_key:
-                    st.warning("请先填写 API Key")
+                    st.session_state._test_conn_result = ("warning", "请先填写 API Key")
                 elif not model_name:
-                    st.warning("请先填写模型名称")
+                    st.session_state._test_conn_result = ("warning", "请先填写模型名称")
                 else:
                     with st.spinner("连接测试中..."):
                         ok, msg = test_api_connection(api_key, base_url, model_name)
                         if ok:
-                            st.toast("连接成功！")
+                            st.session_state._test_conn_result = ("success", "连接成功！")
                         else:
-                            st.error(f"连接失败: {msg}")
+                            st.session_state._test_conn_result = ("error", f"连接失败: {msg}")
+
+            # 显示测试结果
+            if '_test_conn_result' in st.session_state:
+                status, message = st.session_state._test_conn_result
+                if status == "success":
+                    st.success(message)
+                elif status == "warning":
+                    st.warning(message)
+                else:
+                    st.error(message)
 
     # 5. 翻译设置
     with tab_trans:
@@ -504,6 +517,30 @@ def render_settings_dialog():
 
         if auto_scan:
             st.info(f"每 {interval} 分钟自动扫描一次媒体目录，新文件会自动出现在媒体库中")
+
+    # 8. 关于
+    with tab_about:
+        st.subheader("NAS SubMaster 字幕管家")
+        import subprocess
+        try:
+            version = subprocess.check_output(
+                ["git", "describe", "--tags", "--always"],
+                stderr=subprocess.DEVNULL, text=True
+            ).strip()
+        except Exception:
+            version = "未知"
+
+        col_info1, col_info2 = st.columns(2)
+        with col_info1:
+            st.markdown(f"**版本号：** `{version}`")
+            st.markdown("**项目地址：** [GitHub](https://github.com/aexachao/nas-submaster)")
+        with col_info2:
+            st.markdown("**简介：** 视频字幕提取与翻译工具")
+            st.markdown("**技术栈：** Python · Streamlit · Faster-Whisper")
+
+        st.markdown("<br>", unsafe_allow_html=True)
+        st.markdown("---")
+        st.caption("基于 Faster-Whisper 语音识别 + LLM 大模型翻译，为家庭 NAS 用户打造的字幕管理工具。")
 
     st.markdown("---")
 

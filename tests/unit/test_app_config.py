@@ -179,7 +179,7 @@ class TestAppConfigSerialization:
 
     def test_auto_scan_defaults(self):
         config = AppConfig()
-        assert config.auto_scan_enabled is False
+        assert config.auto_scan_enabled is True
         assert config.auto_scan_interval_minutes == 30
 
     def test_auto_scan_round_trip(self):
@@ -192,7 +192,7 @@ class TestAppConfigSerialization:
     def test_auto_scan_from_dict_missing_keys_use_defaults(self):
         data = {}
         config = AppConfig.from_dict(data)
-        assert config.auto_scan_enabled is False
+        assert config.auto_scan_enabled is True
         assert config.auto_scan_interval_minutes == 30
 
 

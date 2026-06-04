@@ -245,7 +245,7 @@ class AppConfig:
     prompt_templates: Dict[ContentType, PromptTemplate] = field(default_factory=dict)
 
     # 自动扫描配置
-    auto_scan_enabled: bool = False
+    auto_scan_enabled: bool = True
     auto_scan_interval_minutes: int = 30
 
     def get_vad_parameters(self) -> VADParameters:
@@ -352,7 +352,7 @@ class AppConfig:
             current_provider=data.get('current_provider', 'DeepSeek (深度求索)'),
             provider_configs=provider_configs,
             prompt_templates=prompt_templates,
-            auto_scan_enabled=data.get('auto_scan_enabled', False),
+            auto_scan_enabled=data.get('auto_scan_enabled', True),
             auto_scan_interval_minutes=data.get('auto_scan_interval_minutes', 30)
         )
 
@@ -405,7 +405,7 @@ class ConfigManager:
                 'current_provider': config_dict.get('current_provider', 'DeepSeek (深度求索)'),
                 'provider_configs': json.loads(config_dict.get('provider_configs', '{}')),
                 'prompt_templates': json.loads(config_dict.get('prompt_templates', '{}')),
-                'auto_scan_enabled': config_dict.get('auto_scan_enabled', 'false') == 'true',
+                'auto_scan_enabled': config_dict.get('auto_scan_enabled', 'true') == 'true',
                 'auto_scan_interval_minutes': int(config_dict.get('auto_scan_interval_minutes', 30))
             }
             
