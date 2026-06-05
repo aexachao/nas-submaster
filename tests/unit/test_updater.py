@@ -89,31 +89,82 @@ class TestReleaseInfo:
 
 
 # ============================================================================
-# get_latest_release (mock GitHub API)
+# get_latest_release (Docker Hub + GitHub fallback)
 # ============================================================================
 
 class TestGetLatestRelease:
     @patch("services.updater.requests.get")
-    def test_success(self, mock_get):
+    def test_success_with_changelog(self, mock_get):
+        """Docker Hub 版本 + GitHub 更新日志都成功"""
+        def side_effect(url, **kwargs):
+            resp = MagicMock()
+            if "hub.docker.com" in url:
+                resp.status_code = 200
+                resp.json.return_value = {
+                    "results": [
+                        {"name": "v1.7.1"},
+                        {"name": "v1.7.0"},
+                        {"name": "latest"},
+                    ]
+                }
+            else:
+                resp.status_code = 200
+                resp.json.return_value = {
+                    "tag_name": "v1.7.1",
+                    "name": "v1.7.1 - Bug Fix",
+                    "body": "修复超时问题",
+                    "html_url": "https://github.com/test/releases/tag/v1.7.1"
+                }
+            return resp
+
+        mock_get.side_effect = side_effect
+        result = get_latest_release()
+        assert result is not None
+        assert result.tag_name == "v1.7.1"
+        assert "Bug Fix" in result.name
+        assert "超时" in result.body
+
+    @patch("services.updater.requests.get")
+    def test_success_without_changelog(self, mock_get):
+        """Docker Hub 成功，GitHub 失败（仅版本号，无更新日志）"""
+        def side_effect(url, **kwargs):
+            resp = MagicMock()
+            if "hub.docker.com" in url:
+                resp.status_code = 200
+                resp.json.return_value = {
+                    "results": [
+                        {"name": "v1.7.1"},
+                        {"name": "latest"},
+                    ]
+                }
+            else:
+                resp.status_code = 404
+            return resp
+
+        mock_get.side_effect = side_effect
+        result = get_latest_release()
+        assert result is not None
+        assert result.tag_name == "v1.7.1"
+        assert result.body == ""  # 无更新日志
+
+    @patch("services.updater.requests.get")
+    def test_docker_hub_error(self, mock_get):
+        """Docker Hub 失败，返回 None"""
         mock_resp = MagicMock()
-        mock_resp.status_code = 200
-        mock_resp.json.return_value = {
-            "tag_name": "v1.7.0",
-            "name": "v1.7.0",
-            "body": "New release",
-            "published_at": "2026-06-05",
-            "html_url": "https://github.com/test"
-        }
+        mock_resp.status_code = 500
         mock_get.return_value = mock_resp
 
         result = get_latest_release()
-        assert result is not None
-        assert result.tag_name == "v1.7.0"
+        assert result is None
 
     @patch("services.updater.requests.get")
-    def test_api_error(self, mock_get):
+    def test_no_version_tags(self, mock_get):
+        """Docker Hub 没有版本标签"""
         mock_resp = MagicMock()
-        mock_resp.status_code = 404
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = {
+            "results": [{"name": "latest"}]
+        }
         mock_get.return_value = mock_resp
 
         result = get_latest_release()
@@ -127,35 +178,42 @@ class TestGetLatestRelease:
 
 
 # ============================================================================
-# get_all_releases (mock GitHub API)
+# get_all_releases (Docker Hub + GitHub fallback)
 # ============================================================================
 
 class TestGetAllReleases:
     @patch("services.updater.requests.get")
     def test_success(self, mock_get):
-        mock_resp = MagicMock()
-        mock_resp.status_code = 200
-        mock_resp.json.return_value = [
-            {
-                "tag_name": "v1.7.0",
-                "name": "v1.7.0",
-                "body": "Release 1.7",
-                "published_at": "2026-06-05",
-                "html_url": "https://github.com/test/1.7"
-            },
-            {
-                "tag_name": "v1.6.0",
-                "name": "v1.6.0",
-                "body": "Release 1.6",
-                "published_at": "2026-05-01",
-                "html_url": "https://github.com/test/1.6"
-            }
-        ]
-        mock_get.return_value = mock_resp
+        def side_effect(url, **kwargs):
+            resp = MagicMock()
+            if "hub.docker.com" in url:
+                resp.status_code = 200
+                resp.json.return_value = {
+                    "results": [
+                        {"name": "v1.7.1"},
+                        {"name": "v1.7.0"},
+                        {"name": "v1.6.0"},
+                        {"name": "latest"},
+                    ]
+                }
+            else:
+                # GitHub changelog for each tag
+                tag = url.split("/")[-1]
+                resp.status_code = 200
+                resp.json.return_value = {
+                    "tag_name": tag,
+                    "name": f"{tag} - Release",
+                    "body": f"Changes in {tag}",
+                    "html_url": f"https://github.com/test/releases/tag/{tag}"
+                }
+            return resp
 
-        result = get_all_releases(limit=2)
-        assert len(result) == 2
-        assert result[0].tag_name == "v1.7.0"
+        mock_get.side_effect = side_effect
+        result = get_all_releases(limit=3)
+        assert len(result) == 3
+        assert result[0].tag_name == "v1.7.1"
+        assert result[1].tag_name == "v1.7.0"
+        assert result[2].tag_name == "v1.6.0"
 
     @patch("services.updater.requests.get")
     def test_network_error(self, mock_get):
@@ -218,7 +276,6 @@ class TestDoUpdate:
 
     @patch("services.updater.subprocess.run")
     def test_up_failure(self, mock_run):
-        # pull succeeds, up fails
         mock_run.side_effect = [
             MagicMock(returncode=0, stderr=""),
             MagicMock(returncode=1, stderr="up failed")

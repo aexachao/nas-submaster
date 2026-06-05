@@ -54,7 +54,15 @@ jobs:
           username: ${{ secrets.DOCKER_USERNAME }}
           password: ${{ secrets.DOCKER_PASSWORD }}
 
-      # 4. 构建并推送
+      # 4. 提取版本号
+      - name: Get version from config
+        id: version
+        run: |
+          VERSION=$(grep -oP 'APP_VERSION = "v\K[^"]+' core/config.py)
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "Detected version: v$VERSION"
+
+      # 5. 构建并推送
       - name: Build and push
         uses: docker/build-push-action@v7
         with:
@@ -66,4 +74,4 @@ jobs:
           # 替换成你的 Docker Hub 用户名和仓库名
           tags: |
             ${{ secrets.DOCKER_USERNAME }}/nas-subtitle-manager:latest
-            ${{ secrets.DOCKER_USERNAME }}/nas-subtitle-manager:${{ github.sha }}
+            ${{ secrets.DOCKER_USERNAME }}/nas-subtitle-manager:v${{ steps.version.outputs.version }}
