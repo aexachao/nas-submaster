@@ -545,32 +545,31 @@ def render_settings_dialog():
     with tab_about:
         st.subheader("NAS SubMaster 字幕管家")
 
-        col_info1, col_info2 = st.columns(2)
-        with col_info1:
+        # 当前版本 + 检查更新按钮
+        col_ver, col_btn = st.columns([3, 1], vertical_alignment="bottom")
+        with col_ver:
             st.markdown(f"**当前版本：** `{APP_VERSION}`")
-            st.markdown("**项目地址：** [GitHub](https://github.com/aexachao/nas-submaster)")
-        with col_info2:
-            st.markdown("**简介：** 视频字幕提取与翻译工具")
-            st.markdown("**技术栈：** Python · Streamlit · Faster-Whisper")
+        with col_btn:
+            if st.button("检查更新", use_container_width=True):
+                with st.spinner("正在检查..."):
+                    latest = get_latest_release()
+                    if latest and compare_versions(APP_VERSION, latest.tag_name) < 0:
+                        st.session_state._update_result = ("update", latest)
+                    elif latest:
+                        st.session_state._update_result = ("latest", None)
+                    else:
+                        st.session_state._update_result = ("error", None)
 
-        st.markdown("<br>", unsafe_allow_html=True)
-        st.markdown("---")
-
-        # 更新检测
-        st.subheader("检查更新")
-
-        # 检查最新版本
-        latest = get_latest_release()
-        if latest:
-            if compare_versions(APP_VERSION, latest.tag_name) < 0:
-                st.success(f"发现新版本 {latest.tag_name}")
-                st.markdown(f"**{latest.name}**")
-                if latest.body:
+        # 内联显示检查结果
+        if '_update_result' in st.session_state:
+            status, release = st.session_state._update_result
+            if status == "update" and release:
+                st.success(f"发现新版本 {release.tag_name}")
+                st.markdown(f"**{release.name}**")
+                if release.body:
                     with st.expander("更新日志", expanded=True):
-                        st.markdown(latest.body)
-                st.markdown(f"[查看 GitHub Release]({latest.html_url})")
-
-                st.markdown("<br>", unsafe_allow_html=True)
+                        st.markdown(release.body)
+                st.markdown(f"[查看 GitHub Release]({release.html_url})")
                 if st.button("立即更新", type="primary", use_container_width=True):
                     with st.spinner("正在更新..."):
                         ok, msg = do_update()
@@ -579,20 +578,24 @@ def render_settings_dialog():
                             st.toast("更新成功，容器将自动重启")
                         else:
                             st.error(msg)
-            else:
+            elif status == "latest":
                 st.info("当前已是最新版本")
-        else:
-            st.warning("无法连接到 GitHub，请检查网络")
+            else:
+                st.warning("无法连接到 GitHub，请检查网络")
 
         st.markdown("<br>", unsafe_allow_html=True)
 
         # 自动更新开关
         auto_update = st.toggle(
-            "启用自动更新检查",
+            "启用自动更新",
             value=config.auto_update_enabled,
             help="开启后，每次打开设置时自动检查是否有新版本"
         )
         update_changes['auto_update_enabled'] = auto_update
+
+        # 项目地址
+        st.markdown("<br>", unsafe_allow_html=True)
+        st.markdown("**项目地址：** [GitHub](https://github.com/aexachao/nas-submaster)")
 
         # 历史版本
         st.markdown("<br>", unsafe_allow_html=True)
