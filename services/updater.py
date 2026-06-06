@@ -264,9 +264,9 @@ def _get_container_info() -> Optional[dict]:
 
 def do_update() -> tuple:
     """
-    通过 Docker Engine API 执行自更新：
-    1. 拉取最新镜像
-    2. 用相同配置重建并重启当前容器
+    通过 Docker Engine API 拉取最新镜像。
+    容器重启由用户在宿主机执行 docker compose up -d 完成，
+    以保证用户自己的 docker-compose.yml 配置和数据不受影响。
 
     Returns:
         (success: bool, message: str)
@@ -285,52 +285,20 @@ def do_update() -> tuple:
         if not container:
             return False, "无法获取当前容器信息"
 
-        # 提取镜像名和容器配置
+        # 提取镜像名
         image = container.get("Config", {}).get("Image", "")
         if not image:
             return False, "无法获取当前容器镜像名"
 
-        container_name = container.get("Name", "").lstrip("/")
-
-        # 1. 拉取最新镜像
+        # 只拉取最新镜像，不触碰正在运行的容器
         status, resp = _docker_api("POST", f"/images/create?fromImage={image}&tag=latest")
         if status not in (200, 201):
             return False, f"拉取镜像失败: {resp}"
 
-        # 2. 停止当前容器
-        status, resp = _docker_api("POST", f"/containers/{container_name}/stop?t=30")
-        if status not in (200, 204, 304):
-            return False, f"停止容器失败: {resp}"
-
-        # 3. 删除当前容器
-        status, resp = _docker_api("DELETE", f"/containers/{container_name}?v=true")
-        if status not in (200, 204):
-            return False, f"删除旧容器失败: {resp}"
-
-        # 4. 用相同配置创建新容器
-        create_body = container.get("Config", {})
-        # 构建 HostConfig
-        host_config = container.get("HostConfig", {})
-        create_body["HostConfig"] = host_config
-
-        status, resp = _docker_api(
-            "POST",
-            f"/containers/create?name={container_name}",
-            body=create_body,
+        return True, (
+            "镜像已更新！请在宿主机执行以下命令完成重启：\n"
+            "docker compose pull && docker compose up -d"
         )
-        if status not in (200, 201):
-            return False, f"创建新容器失败: {resp}"
-
-        new_container_id = resp.get("Id", "")
-        if not new_container_id:
-            return False, "创建容器未返回 ID"
-
-        # 5. 启动新容器
-        status, resp = _docker_api("POST", f"/containers/{new_container_id}/start")
-        if status not in (200, 204, 304):
-            return False, f"启动新容器失败: {resp}"
-
-        return True, "更新成功，容器已重启"
 
     except ConnectionRefusedError:
         return False, "无法连接 Docker Socket，请确认已挂载 /var/run/docker.sock"

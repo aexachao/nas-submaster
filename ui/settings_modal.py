@@ -581,11 +581,10 @@ def render_settings_dialog():
                         st.markdown(release.body)
                 st.markdown(f"[查看 GitHub Release]({release.html_url})")
                 if st.button("立即更新", type="primary", use_container_width=True):
-                    with st.spinner("正在更新..."):
+                    with st.spinner("正在拉取镜像..."):
                         ok, msg = do_update()
                         if ok:
                             st.success(msg)
-                            st.toast("更新成功，容器将自动重启")
                         else:
                             st.error(msg)
             elif status == "latest":

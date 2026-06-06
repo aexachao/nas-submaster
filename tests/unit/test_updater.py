@@ -267,18 +267,12 @@ class TestDoUpdate:
         mock_info.return_value = {
             "Name": "/test-container",
             "Config": {"Image": "aexachao/nas-subtitle-manager:latest"},
-            "HostConfig": {},
         }
-        mock_api.side_effect = [
-            (200, {}),       # pull image
-            (200, {}),       # stop container
-            (200, {}),       # delete container
-            (201, {"Id": "abc123"}),  # create container
-            (200, {}),       # start container
-        ]
+        mock_api.return_value = (200, {})
         ok, msg = do_update()
         assert ok is True
-        assert "成功" in msg
+        assert "镜像已更新" in msg
+        assert "docker compose" in msg
 
     @patch("services.updater._docker_api")
     @patch("services.updater._get_container_info")
@@ -287,29 +281,11 @@ class TestDoUpdate:
         mock_info.return_value = {
             "Name": "/test-container",
             "Config": {"Image": "aexachao/nas-subtitle-manager:latest"},
-            "HostConfig": {},
         }
         mock_api.return_value = (500, "pull failed")
         ok, msg = do_update()
         assert ok is False
         assert "拉取镜像失败" in msg
-
-    @patch("services.updater._docker_api")
-    @patch("services.updater._get_container_info")
-    @patch("services.updater.os.path.exists", return_value=True)
-    def test_stop_failure(self, mock_exists, mock_info, mock_api):
-        mock_info.return_value = {
-            "Name": "/test-container",
-            "Config": {"Image": "aexachao/nas-subtitle-manager:latest"},
-            "HostConfig": {},
-        }
-        mock_api.side_effect = [
-            (200, {}),       # pull image
-            (500, "stop failed"),  # stop fails
-        ]
-        ok, msg = do_update()
-        assert ok is False
-        assert "停止容器失败" in msg
 
     @patch("services.updater.os.path.exists", return_value=False)
     def test_socket_not_found(self, mock_exists):
