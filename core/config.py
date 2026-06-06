@@ -12,7 +12,7 @@ from dataclasses import dataclass, field, asdict
 
 
 # 应用版本号（每次发版手动更新）
-APP_VERSION = "v1.7.8"
+APP_VERSION = "v1.7.9"
 
 from core.models import (
     ContentType,

@@ -16,7 +16,18 @@ from core.config import APP_VERSION
 
 # Docker Hub 仓库信息
 DOCKER_HUB_REPO = "aexachao/nas-subtitle-manager"
+
+# Docker Hub v2 REST API（带索引缓存，新 tag 推送后 5-30 分钟才可见）
+# 仅作为 fallback 使用。
 DOCKER_HUB_API = f"https://hub.docker.com/v2/repositories/{DOCKER_HUB_REPO}/tags"
+
+# Docker Registry v2 API（直读 registry 数据层，无索引缓存延迟）
+# 这是检测新版本的主要数据源 ——
+# 2026-06-06 踩坑：hub.docker.com/v2 在 CI 推完镜像后 5+ 分钟 API 仍不显示
+# 新 tag，导致 has_update() 永远返回 False。改用 registry-1.docker.io 后
+# 推送完成后几秒内即可检测到。详细原因见 README 末尾的"Docker Hub 索引延迟"小节。
+DOCKER_REGISTRY_API = f"https://registry-1.docker.io/v2/{DOCKER_HUB_REPO}/tags/list"
+DOCKER_REGISTRY_AUTH = "https://auth.docker.io/token"
 
 # GitHub 仓库信息（仅用于获取更新日志）
 GITHUB_OWNER = "aexachao"
@@ -72,9 +83,75 @@ def compare_versions(current: str, latest: str) -> int:
     return 0
 
 
+def _get_latest_version_from_registry() -> Optional[str]:
+    """
+    从 Docker Registry v2 API 获取最新版本号标签（主数据源）。
+
+    2026-06-06 踩坑：Docker Hub v2 REST API（hub.docker.com/v2）有索引
+    缓存延迟，CI 推完镜像后 5-30 分钟 API 才显示新 tag。改用 Docker
+    Registry v2 API（registry-1.docker.io/v2/.../tags/list）直读
+    registry 数据层，推送完成后几秒内即可检测到。
+
+    流程：
+    1. 用 anonymous bearer token 调 auth.docker.io 拿 pull scope token
+    2. 用 token 调 registry-1.docker.io/v2/{repo}/tags/list 拿完整 tag 列表
+    3. 过滤 v 前缀 + 排除 latest
+    4. 用 max(parse_version) 选最新
+
+    Returns:
+        版本号字符串（如 "v1.7.8"）或 None（网络错误 / 拿不到 token / tag 列表空）
+    """
+    try:
+        # 1. 拿 anonymous pull token
+        auth_resp = requests.get(
+            DOCKER_REGISTRY_AUTH,
+            params={
+                "service": "registry.docker.io",
+                "scope": f"repository:{DOCKER_HUB_REPO}:pull",
+            },
+            timeout=10,
+        )
+        if auth_resp.status_code != 200:
+            print(f"[Updater] Registry auth failed: {auth_resp.status_code}")
+            return None
+        token = auth_resp.json().get("token")
+        if not token:
+            print("[Updater] Registry auth returned no token")
+            return None
+
+        # 2. 调 Registry v2 tags/list
+        resp = requests.get(
+            DOCKER_REGISTRY_API,
+            headers={"Authorization": f"Bearer {token}"},
+            params={"n": "100"},  # 拉 100 个 tag，足够覆盖所有历史版本
+            timeout=10,
+        )
+        if resp.status_code != 200:
+            print(f"[Updater] Registry tags/list failed: {resp.status_code} {resp.text[:200]}")
+            return None
+
+        tags = resp.json().get("tags", []) or []
+        version_tags = [
+            t for t in tags
+            if t.startswith(VERSION_TAG_PREFIX) and t != "latest"
+        ]
+        if not version_tags:
+            return None
+
+        # 找到最新版本
+        return max(version_tags, key=lambda t: parse_version(t))
+
+    except Exception as e:
+        print(f"[Updater] Failed to check Docker Registry: {e}")
+        return None
+
+
 def _get_latest_version_from_dockerhub() -> Optional[str]:
     """
-    从 Docker Hub 获取最新版本号标签。
+    从 Docker Hub v2 REST API 获取最新版本号标签（fallback 数据源）。
+
+    注意：这个 API 有索引缓存延迟，CI 推完镜像后可能 5-30 分钟才
+    看到新 tag。优先使用 _get_latest_version_from_registry()。
 
     Returns:
         版本号字符串（如 "v1.7.1"）或 None
@@ -104,6 +181,68 @@ def _get_latest_version_from_dockerhub() -> Optional[str]:
     except Exception as e:
         print(f"[Updater] Failed to check Docker Hub: {e}")
         return None
+
+
+def _get_latest_version() -> Optional[str]:
+    """
+    获取最新版本号：优先 Registry v2 API，fallback 到 Docker Hub v2 API。
+
+    2026-06-06：原实现只用 Docker Hub v2，但该 API 有索引缓存延迟，
+    导致 CI 推完镜像后 has_update() 5-30 分钟内都检测不到新版本。
+    现在 Registry v2 拿不到时 fallback 到 Hub API（兼容极端情况：
+    比如 registry-1.docker.io 临时不可用）。
+    """
+    version = _get_latest_version_from_registry()
+    if version:
+        return version
+    print("[Updater] Registry v2 API returned no version, falling back to Docker Hub v2 API")
+    return _get_latest_version_from_dockerhub()
+
+
+def _fetch_all_version_tags_from_registry() -> List[str]:
+    """
+    从 Docker Registry v2 API 拉取所有 v 前缀版本 tag（不含 latest）。
+
+    跟 _get_latest_version_from_registry() 区别：那个只返回 max 1 个，
+    这个返回完整列表。给 get_all_releases() 用。
+
+    Returns:
+        版本号列表（未排序），如 ["v1.7.6", "v1.7.7", "v1.7.8"]
+        网络错误时返回空列表（让上层 fallback 到 Docker Hub v2）。
+    """
+    try:
+        auth_resp = requests.get(
+            DOCKER_REGISTRY_AUTH,
+            params={
+                "service": "registry.docker.io",
+                "scope": f"repository:{DOCKER_HUB_REPO}:pull",
+            },
+            timeout=10,
+        )
+        if auth_resp.status_code != 200:
+            return []
+        token = auth_resp.json().get("token")
+        if not token:
+            return []
+
+        resp = requests.get(
+            DOCKER_REGISTRY_API,
+            headers={"Authorization": f"Bearer {token}"},
+            params={"n": "100"},
+            timeout=10,
+        )
+        if resp.status_code != 200:
+            return []
+
+        tags = resp.json().get("tags", []) or []
+        return [
+            t for t in tags
+            if t.startswith(VERSION_TAG_PREFIX) and t != "latest"
+        ]
+
+    except Exception as e:
+        print(f"[Updater] Failed to fetch tags from registry: {e}")
+        return []
 
 
 def _get_changelog_from_github(tag_name: str) -> tuple:
@@ -141,7 +280,7 @@ def get_latest_release() -> Optional[ReleaseInfo]:
     Returns:
         ReleaseInfo 或 None（网络错误时）
     """
-    tag_name = _get_latest_version_from_dockerhub()
+    tag_name = _get_latest_version()
     if not tag_name:
         return None
 
@@ -165,33 +304,40 @@ def get_all_releases(limit: int = 10) -> List[ReleaseInfo]:
     """
     获取最近 N 个版本的信息。
 
+    2026-06-06 改进：原本用 hub.docker.com/v2 有索引缓存延迟，
+    现在改用 Docker Registry v2 API（registry-1.docker.io）拿 tag 列表，
+    拉全量后按版本号降序取前 N 个。Docker Hub v2 API 仅作为 fallback。
+
     Args:
         limit: 最多返回条数
     Returns:
         ReleaseInfo 列表
     """
     try:
-        resp = requests.get(
-            DOCKER_HUB_API,
-            params={"page_size": 50, "ordering": "-last_updated"},
-            timeout=10,
-        )
-        if resp.status_code != 200:
-            return []
-
-        tags = resp.json().get("results", [])
-        version_tags = [
-            t["name"] for t in tags
-            if t["name"].startswith(VERSION_TAG_PREFIX)
-            and t["name"] != "latest"
-        ]
+        # 优先用 Registry v2（无索引缓存延迟）
+        tag_names = _fetch_all_version_tags_from_registry()
+        if not tag_names:
+            # Fallback 到 Docker Hub v2
+            print("[Updater] Registry v2 returned no tags, falling back to Docker Hub v2")
+            resp = requests.get(
+                DOCKER_HUB_API,
+                params={"page_size": 50, "ordering": "-last_updated"},
+                timeout=10,
+            )
+            if resp.status_code != 200:
+                return []
+            tags = resp.json().get("results", [])
+            tag_names = [
+                t["name"] for t in tags
+                if t["name"].startswith(VERSION_TAG_PREFIX) and t["name"] != "latest"
+            ]
 
         # 按版本号降序排列
-        version_tags.sort(key=lambda t: parse_version(t), reverse=True)
-        version_tags = version_tags[:limit]
+        tag_names.sort(key=lambda t: parse_version(t), reverse=True)
+        tag_names = tag_names[:limit]
 
         results = []
-        for tag in version_tags:
+        for tag in tag_names:
             name, body, html_url = _get_changelog_from_github(tag)
             if not name:
                 name = tag

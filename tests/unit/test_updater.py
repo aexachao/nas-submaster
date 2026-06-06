@@ -94,133 +94,455 @@ class TestReleaseInfo:
 # ============================================================================
 
 class TestGetLatestRelease:
-    @patch("services.updater.requests.get")
-    def test_success_with_changelog(self, mock_get):
-        """Docker Hub 版本 + GitHub 更新日志都成功"""
+    """
+    2026-06-06 改造：get_latest_release() 优先用 Docker Registry v2 API
+    （registry-1.docker.io），fallback 到 Docker Hub v2 API（hub.docker.com）。
+    原因：Hub v2 有索引缓存延迟，CI 推完镜像后 5-30 分钟才可见。
+    """
+
+    def _mock_registry_v2_response(self, mock_get, tags: list):
+        """helper: mock Registry v2 完整两步（auth + tags/list）"""
         def side_effect(url, **kwargs):
             resp = MagicMock()
-            if "hub.docker.com" in url:
+            if "auth.docker.io" in url:
                 resp.status_code = 200
-                resp.json.return_value = {
-                    "results": [
-                        {"name": "v1.7.1"},
-                        {"name": "v1.7.0"},
-                        {"name": "latest"},
-                    ]
-                }
+                resp.json.return_value = {"token": "fake-token-abc123"}
+            elif "registry-1.docker.io" in url:
+                resp.status_code = 200
+                resp.json.return_value = {"name": "aexachao/nas-subtitle-manager", "tags": tags}
             else:
+                # GitHub changelog
                 resp.status_code = 200
+                tag = url.split("/")[-1]
                 resp.json.return_value = {
-                    "tag_name": "v1.7.1",
-                    "name": "v1.7.1 - Bug Fix",
-                    "body": "修复超时问题",
-                    "html_url": "https://github.com/test/releases/tag/v1.7.1"
+                    "tag_name": tag,
+                    "name": f"{tag} - Release",
+                    "body": f"Changes in {tag}",
+                    "html_url": f"https://github.com/test/releases/tag/{tag}",
                 }
             return resp
-
         mock_get.side_effect = side_effect
+
+    @patch("services.updater.requests.get")
+    def test_success_with_changelog(self, mock_get):
+        """Registry v2 拿版本 + GitHub 拿更新日志，都成功"""
+        self._mock_registry_v2_response(
+            mock_get,
+            tags=["v1.7.8", "v1.7.7", "v1.7.6", "latest"],
+        )
         result = get_latest_release()
         assert result is not None
-        assert result.tag_name == "v1.7.1"
-        assert "Bug Fix" in result.name
-        assert "超时" in result.body
+        assert result.tag_name == "v1.7.8"  # Registry v2 路径生效，取到最新
+        assert "Release" in result.name
+        assert "Changes in v1.7.8" in result.body
 
     @patch("services.updater.requests.get")
     def test_success_without_changelog(self, mock_get):
-        """Docker Hub 成功，GitHub 失败（仅版本号，无更新日志）"""
+        """Registry v2 拿版本成功，GitHub 404（无更新日志）"""
         def side_effect(url, **kwargs):
             resp = MagicMock()
-            if "hub.docker.com" in url:
+            if "auth.docker.io" in url:
+                resp.status_code = 200
+                resp.json.return_value = {"token": "fake-token"}
+            elif "registry-1.docker.io" in url:
+                resp.status_code = 200
+                resp.json.return_value = {"tags": ["v1.7.8", "latest"]}
+            else:
+                resp.status_code = 404
+            return resp
+        mock_get.side_effect = side_effect
+
+        result = get_latest_release()
+        assert result is not None
+        assert result.tag_name == "v1.7.8"
+        assert result.body == ""  # 无更新日志
+        assert "v1.7.8" in result.html_url
+
+    @patch("services.updater.requests.get")
+    def test_registry_v2_fails_fallback_to_hub(self, mock_get):
+        """Registry v2 失败时（认证失败），fallback 到 Docker Hub v2"""
+        def side_effect(url, **kwargs):
+            resp = MagicMock()
+            if "auth.docker.io" in url:
+                # Registry auth 失败 → 模拟 Registry v2 不可用
+                resp.status_code = 500
+            elif "hub.docker.com" in url:
+                # Fallback 到 Hub v2 成功
                 resp.status_code = 200
                 resp.json.return_value = {
                     "results": [
-                        {"name": "v1.7.1"},
+                        {"name": "v1.7.6"},
+                        {"name": "v1.7.5"},
                         {"name": "latest"},
                     ]
                 }
             else:
-                resp.status_code = 404
+                resp.status_code = 200
+                resp.json.return_value = {"tag_name": "v1.7.6", "name": "v1.7.6", "body": "", "html_url": ""}
             return resp
-
         mock_get.side_effect = side_effect
+
         result = get_latest_release()
         assert result is not None
-        assert result.tag_name == "v1.7.1"
-        assert result.body == ""  # 无更新日志
+        assert result.tag_name == "v1.7.6"  # 走了 fallback 拿到 Hub v2 的最新
 
     @patch("services.updater.requests.get")
-    def test_docker_hub_error(self, mock_get):
-        """Docker Hub 失败，返回 None"""
-        mock_resp = MagicMock()
-        mock_resp.status_code = 500
-        mock_get.return_value = mock_resp
+    def test_both_apis_fail(self, mock_get):
+        """Registry v2 + Hub v2 都失败 → 返回 None"""
+        def side_effect(url, **kwargs):
+            resp = MagicMock()
+            if "auth.docker.io" in url:
+                resp.status_code = 500
+            else:
+                resp.status_code = 500
+            return resp
+        mock_get.side_effect = side_effect
 
         result = get_latest_release()
         assert result is None
 
     @patch("services.updater.requests.get")
     def test_no_version_tags(self, mock_get):
-        """Docker Hub 没有版本标签"""
-        mock_resp = MagicMock()
-        mock_resp.status_code = 200
-        mock_resp.json.return_value = {
-            "results": [{"name": "latest"}]
-        }
-        mock_get.return_value = mock_resp
-
+        """Registry v2 返回的 tag 列表里没有 v 前缀 tag"""
+        self._mock_registry_v2_response(
+            mock_get,
+            tags=["latest", "abc123def"],  # 没有任何 v1.7.x
+        )
+        # Registry 返回空 version_tags → fallback 到 Hub v2 → Hub 也拿不到
+        # 这里需要让 Hub v2 也失败
+        def side_effect_2(url, **kwargs):
+            resp = MagicMock()
+            if "auth.docker.io" in url:
+                resp.status_code = 200
+                resp.json.return_value = {"token": "fake"}
+            elif "registry-1.docker.io" in url:
+                resp.status_code = 200
+                resp.json.return_value = {"tags": ["latest", "abc123def"]}
+            else:
+                # GitHub + Hub v2 都不行
+                resp.status_code = 500
+            return resp
+        mock_get.side_effect = side_effect_2
         result = get_latest_release()
         assert result is None
 
     @patch("services.updater.requests.get")
     def test_network_error(self, mock_get):
+        """完全网络错误 → 返回 None，不抛异常"""
         mock_get.side_effect = Exception("Network error")
         result = get_latest_release()
         assert result is None
 
 
 # ============================================================================
-# get_all_releases (Docker Hub + GitHub fallback)
+# get_all_releases (Registry v2 主路径 + Hub v2 fallback)
 # ============================================================================
 
 class TestGetAllReleases:
+    """
+    2026-06-06 改造：get_all_releases() 优先用 Registry v2 拿全量 tag，
+    fallback 到 Hub v2。
+    """
+
     @patch("services.updater.requests.get")
-    def test_success(self, mock_get):
+    def test_success_from_registry_v2(self, mock_get):
+        """Registry v2 路径：拉全量 tag → 按版本号降序 → 取前 N"""
         def side_effect(url, **kwargs):
             resp = MagicMock()
-            if "hub.docker.com" in url:
+            if "auth.docker.io" in url:
                 resp.status_code = 200
+                resp.json.return_value = {"token": "fake-token"}
+            elif "registry-1.docker.io" in url:
+                resp.status_code = 200
+                # 故意打乱顺序，测试排序逻辑
                 resp.json.return_value = {
-                    "results": [
-                        {"name": "v1.7.1"},
-                        {"name": "v1.7.0"},
-                        {"name": "v1.6.0"},
-                        {"name": "latest"},
-                    ]
+                    "tags": ["v1.7.6", "latest", "v1.7.8", "v1.7.7", "v1.6.0"]
                 }
             else:
-                # GitHub changelog for each tag
                 tag = url.split("/")[-1]
                 resp.status_code = 200
                 resp.json.return_value = {
                     "tag_name": tag,
                     "name": f"{tag} - Release",
                     "body": f"Changes in {tag}",
-                    "html_url": f"https://github.com/test/releases/tag/{tag}"
+                    "html_url": f"https://github.com/test/releases/tag/{tag}",
                 }
             return resp
-
         mock_get.side_effect = side_effect
+
         result = get_all_releases(limit=3)
         assert len(result) == 3
-        assert result[0].tag_name == "v1.7.1"
-        assert result[1].tag_name == "v1.7.0"
-        assert result[2].tag_name == "v1.6.0"
+        # 按版本号降序：v1.7.8 > v1.7.7 > v1.7.6
+        assert result[0].tag_name == "v1.7.8"
+        assert result[1].tag_name == "v1.7.7"
+        assert result[2].tag_name == "v1.7.6"
+
+    @patch("services.updater.requests.get")
+    def test_fallback_to_hub_v2(self, mock_get):
+        """Registry v2 失败 → fallback 到 Hub v2"""
+        def side_effect(url, **kwargs):
+            resp = MagicMock()
+            if "auth.docker.io" in url:
+                resp.status_code = 200
+                resp.json.return_value = {"token": "fake-token"}
+            elif "registry-1.docker.io" in url:
+                resp.status_code = 200
+                # Registry v2 返回空 tags 列表 → 触发 fallback
+                resp.json.return_value = {"tags": ["latest"]}  # 无 v 前缀
+            elif "hub.docker.com" in url:
+                resp.status_code = 200
+                resp.json.return_value = {
+                    "results": [
+                        {"name": "v1.7.6"},
+                        {"name": "v1.7.5"},
+                        {"name": "latest"},
+                    ]
+                }
+            else:
+                tag = url.split("/")[-1]
+                resp.status_code = 200
+                resp.json.return_value = {
+                    "tag_name": tag, "name": f"{tag}", "body": "", "html_url": ""
+                }
+            return resp
+        mock_get.side_effect = side_effect
+
+        result = get_all_releases(limit=5)
+        assert len(result) == 2  # v1.7.6 + v1.7.5（Hub v2 数据）
+        assert result[0].tag_name == "v1.7.6"
+        assert result[1].tag_name == "v1.7.5"
 
     @patch("services.updater.requests.get")
     def test_network_error(self, mock_get):
+        """完全网络错误 → 返回空列表，不抛异常"""
         mock_get.side_effect = Exception("Network error")
         result = get_all_releases()
         assert result == []
+
+
+# ============================================================================
+# Registry v2 API 详细行为测试
+# ============================================================================
+
+class TestRegistryV2API:
+    """
+    2026-06-06 新增：直接测 _get_latest_version_from_registry() 和
+    _fetch_all_version_tags_from_registry()，覆盖无索引缓存的"主路径"。
+    """
+
+    @patch("services.updater.requests.get")
+    def test_auth_token_requested_with_correct_scope(self, mock_get):
+        """调 Registry 前必须先拿 pull scope 的 token"""
+        from services.updater import _get_latest_version_from_registry
+
+        def side_effect(url, **kwargs):
+            resp = MagicMock()
+            if "auth.docker.io" in url:
+                resp.status_code = 200
+                resp.json.return_value = {"token": "test-token"}
+            elif "registry-1.docker.io" in url:
+                resp.status_code = 200
+                resp.json.return_value = {"tags": ["v1.7.8", "v1.7.7"]}
+            return resp
+        mock_get.side_effect = side_effect
+        _get_latest_version_from_registry()
+
+        # 验证第一次调的是 auth.docker.io,且 params 含 scope=repository:...:pull
+        first_call = mock_get.call_args_list[0]
+        assert "auth.docker.io" in first_call.args[0]
+        params = first_call.kwargs.get("params", {})
+        assert params.get("scope") == "repository:aexachao/nas-subtitle-manager:pull"
+        assert params.get("service") == "registry.docker.io"
+
+    @patch("services.updater.requests.get")
+    def test_registry_call_uses_bearer_token(self, mock_get):
+        """调 registry-1.docker.io 时必须带 Bearer token header"""
+        from services.updater import _get_latest_version_from_registry
+
+        def side_effect(url, **kwargs):
+            resp = MagicMock()
+            if "auth.docker.io" in url:
+                resp.status_code = 200
+                resp.json.return_value = {"token": "my-special-token-xyz"}
+            elif "registry-1.docker.io" in url:
+                resp.status_code = 200
+                resp.json.return_value = {"tags": ["v1.7.8"]}
+            return resp
+        mock_get.side_effect = side_effect
+        _get_latest_version_from_registry()
+
+        # 找 registry 这次调用
+        registry_call = None
+        for call in mock_get.call_args_list:
+            if "registry-1.docker.io" in call.args[0]:
+                registry_call = call
+                break
+        assert registry_call is not None
+        headers = registry_call.kwargs.get("headers", {})
+        assert headers.get("Authorization") == "Bearer my-special-token-xyz"
+
+    @patch("services.updater.requests.get")
+    def test_auth_fails_returns_none(self, mock_get):
+        """auth.docker.io 失败 → Registry 路径返回 None（让上层 fallback）"""
+        from services.updater import _get_latest_version_from_registry
+
+        def side_effect(url, **kwargs):
+            resp = MagicMock()
+            if "auth.docker.io" in url:
+                resp.status_code = 401  # 认证失败
+            return resp
+        mock_get.side_effect = side_effect
+        result = _get_latest_version_from_registry()
+        assert result is None
+
+    @patch("services.updater.requests.get")
+    def test_auth_returns_no_token(self, mock_get):
+        """auth.docker.io 200 但响应里没 token → 返回 None"""
+        from services.updater import _get_latest_version_from_registry
+
+        def side_effect(url, **kwargs):
+            resp = MagicMock()
+            if "auth.docker.io" in url:
+                resp.status_code = 200
+                resp.json.return_value = {}  # 没 token 字段
+            return resp
+        mock_get.side_effect = side_effect
+        result = _get_latest_version_from_registry()
+        assert result is None
+
+    @patch("services.updater.requests.get")
+    def test_registry_call_fails(self, mock_get):
+        """registry-1.docker.io 失败 → 返回 None"""
+        from services.updater import _get_latest_version_from_registry
+
+        def side_effect(url, **kwargs):
+            resp = MagicMock()
+            if "auth.docker.io" in url:
+                resp.status_code = 200
+                resp.json.return_value = {"token": "fake"}
+            elif "registry-1.docker.io" in url:
+                resp.status_code = 503
+            return resp
+        mock_get.side_effect = side_effect
+        result = _get_latest_version_from_registry()
+        assert result is None
+
+    @patch("services.updater.requests.get")
+    def test_filters_out_latest_and_non_version_tags(self, mock_get):
+        """tag 列表里 latest 和非 v 前缀 tag 必须被过滤"""
+        from services.updater import _get_latest_version_from_registry
+
+        def side_effect(url, **kwargs):
+            resp = MagicMock()
+            if "auth.docker.io" in url:
+                resp.status_code = 200
+                resp.json.return_value = {"token": "fake"}
+            elif "registry-1.docker.io" in url:
+                resp.status_code = 200
+                resp.json.return_value = {
+                    "tags": [
+                        "latest",            # 排除
+                        "abc123def456",     # 排除（commit hash）
+                        "v1.7.8",            # 保留
+                        "v1.7.7",            # 保留
+                        "v1.7.6",            # 保留
+                        "v1.6.0-rc1",        # 保留
+                    ]
+                }
+            return resp
+        mock_get.side_effect = side_effect
+        result = _get_latest_version_from_registry()
+        assert result == "v1.7.8"  # max(parse_version) 选最高的
+
+    @patch("services.updater.requests.get")
+    def test_picks_max_version_not_first(self, mock_get):
+        """必须按 parse_version 选最大,不能直接取 list[0]"""
+        from services.updater import _get_latest_version_from_registry
+
+        def side_effect(url, **kwargs):
+            resp = MagicMock()
+            if "auth.docker.io" in url:
+                resp.status_code = 200
+                resp.json.return_value = {"token": "fake"}
+            elif "registry-1.docker.io" in url:
+                resp.status_code = 200
+                # 故意把 v1.7.8 放最前面，但 v1.10.0 才是最大
+                resp.json.return_value = {
+                    "tags": ["v1.7.8", "v1.10.0", "v1.9.5", "v1.7.6", "latest"]
+                }
+            return resp
+        mock_get.side_effect = side_effect
+        result = _get_latest_version_from_registry()
+        assert result == "v1.10.0"  # 按数字比较，不是字符串
+
+    @patch("services.updater.requests.get")
+    def test_fetch_all_returns_full_list(self, mock_get):
+        """_fetch_all_version_tags_from_registry() 返回完整列表,不是只 1 个"""
+        from services.updater import _fetch_all_version_tags_from_registry
+
+        def side_effect(url, **kwargs):
+            resp = MagicMock()
+            if "auth.docker.io" in url:
+                resp.status_code = 200
+                resp.json.return_value = {"token": "fake"}
+            elif "registry-1.docker.io" in url:
+                resp.status_code = 200
+                resp.json.return_value = {
+                    "tags": ["v1.7.8", "v1.7.7", "v1.7.6", "v1.7.5", "latest", "abc123"]
+                }
+            return resp
+        mock_get.side_effect = side_effect
+        result = _fetch_all_version_tags_from_registry()
+        # 不含 latest 和 commit hash
+        assert set(result) == {"v1.7.8", "v1.7.7", "v1.7.6", "v1.7.5"}
+        assert "latest" not in result
+
+    @patch("services.updater.requests.get")
+    def test_get_latest_version_prefers_registry(self, mock_get):
+        """_get_latest_version() 必须先调 Registry v2 路径,成功就不调 Hub v2"""
+        from services.updater import _get_latest_version
+
+        def side_effect(url, **kwargs):
+            resp = MagicMock()
+            if "auth.docker.io" in url:
+                resp.status_code = 200
+                resp.json.return_value = {"token": "fake"}
+            elif "registry-1.docker.io" in url:
+                resp.status_code = 200
+                resp.json.return_value = {"tags": ["v1.7.8"]}
+            elif "hub.docker.com" in url:
+                # 如果走到了 Hub v2,测试就失败（说明没走 Registry 主路径）
+                raise AssertionError(
+                    "不应该调用 hub.docker.com — Registry v2 应该先成功"
+                )
+            return resp
+        mock_get.side_effect = side_effect
+
+        result = _get_latest_version()
+        assert result == "v1.7.8"
+
+    @patch("services.updater.requests.get")
+    def test_get_latest_version_fallback_when_registry_empty(self, mock_get):
+        """Registry 拿到 version_tags=[] 时 → 触发 fallback"""
+        from services.updater import _get_latest_version
+
+        def side_effect(url, **kwargs):
+            resp = MagicMock()
+            if "auth.docker.io" in url:
+                resp.status_code = 200
+                resp.json.return_value = {"token": "fake"}
+            elif "registry-1.docker.io" in url:
+                resp.status_code = 200
+                resp.json.return_value = {"tags": ["latest", "abc123"]}  # 无 v 前缀
+            elif "hub.docker.com" in url:
+                resp.status_code = 200
+                resp.json.return_value = {
+                    "results": [{"name": "v1.7.6"}, {"name": "latest"}]
+                }
+            return resp
+        mock_get.side_effect = side_effect
+        result = _get_latest_version()
+        assert result == "v1.7.6"  # 走了 fallback
 
 
 # ============================================================================
