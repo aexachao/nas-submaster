@@ -233,23 +233,44 @@ def _docker_api(method: str, path: str, body: dict = None, timeout: int = 300) -
         timeout: 超时秒数
     Returns:
         (status_code, response_json_or_text)
+
+    实现说明:
+        Docker Engine API 监听 unix:///var/run/docker.sock，HTTP 协议。
+        Python 3.13+ 才有 http.client.HTTPUnixConnection，但项目 Dockerfile 用
+        nvidia/cuda 基础镜像只带 Python 3.10。为兼容所有 3.10+ 版本，
+        这里用通用方案：手动创建 AF_UNIX socket，挂到 HTTPConnection.sock 上。
     """
     import http.client
     import json
+    import socket as _socket
 
-    conn = http.client.HTTPUnixConnection(DOCKER_SOCKET)
+    # 用 AF_UNIX 手动建连（兼容 Python 3.10 ~ 3.13）
+    sock = _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM)
+    sock.settimeout(timeout)
     try:
-        headers = {"Content-Type": "application/json"}
-        payload = json.dumps(body) if body else None
-        conn.request(method, f"http://localhost{path}", body=payload, headers=headers)
-        resp = conn.getresponse()
-        data = resp.read().decode("utf-8", errors="replace")
+        sock.connect(DOCKER_SOCKET)
+        conn = http.client.HTTPConnection("localhost", timeout=timeout)
+        conn.sock = sock
+        # 接管 sock 的生命周期：conn.close() 时会关掉它
+        sock = None  # 防止 finally 里重复 close
         try:
-            return resp.status, json.loads(data)
-        except json.JSONDecodeError:
-            return resp.status, data
+            headers = {"Content-Type": "application/json"}
+            payload = json.dumps(body) if body else None
+            conn.request(method, f"http://localhost{path}", body=payload, headers=headers)
+            resp = conn.getresponse()
+            data = resp.read().decode("utf-8", errors="replace")
+            try:
+                return resp.status, json.loads(data)
+            except json.JSONDecodeError:
+                return resp.status, data
+        finally:
+            conn.close()
     finally:
-        conn.close()
+        if sock is not None:
+            try:
+                sock.close()
+            except Exception:
+                pass
 
 
 def _get_container_info() -> Optional[dict]:
