@@ -11,9 +11,9 @@ ENV PYTHONUNBUFFERED=1 \
 # 设置工作目录
 WORKDIR /app
 
-# 安装系统依赖
+# 安装系统依赖（python3 已内置在 ubuntu22.04 基础镜像中，无需显式安装 python3.10）
 RUN apt-get update && apt-get install -y \
-    python3.10 \
+    python3 \
     python3-pip \
     ffmpeg \
     git \
@@ -24,18 +24,15 @@ RUN apt-get update && apt-get install -y \
     net-tools \
     && ln -snf /usr/share/zoneinfo/$TZ /etc/localtime \
     && echo $TZ > /etc/timezone \
+    && ln -sf /usr/bin/python3 /usr/bin/python \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
-
-# 让 `python` / `pip` 命令指向 python3.10
-RUN update-alternatives --install /usr/bin/python python /usr/bin/python3.10 1 \
-    && update-alternatives --install /usr/bin/pip pip /usr/bin/pip3 1
 
 # 复制依赖文件
 COPY requirements.txt .
 
 # 使用 pip 默认源安装依赖
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip3 install --no-cache-dir -r requirements.txt
 
 # 复制所有应用代码
 COPY . .
