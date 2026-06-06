@@ -21,7 +21,7 @@ from core.config import (
 from core.models import ContentType, ISO_LANG_MAP, TARGET_LANG_OPTIONS, WHISPER_SOURCE_LANG_MAP, PromptTemplate
 from database.connection import get_db_connection
 from services.whisper_service import is_model_downloaded, get_model_dir
-from services.updater import get_latest_release, get_all_releases, has_update, do_update, compare_versions, ReleaseInfo
+from services.updater import get_latest_release, has_update, do_update, compare_versions
 
 
 # ============================================================================
@@ -605,26 +605,6 @@ def render_settings_dialog():
         # 项目地址
         st.markdown("<br>", unsafe_allow_html=True)
         st.markdown("**项目地址：** [GitHub](https://github.com/aexachao/nas-submaster)")
-
-        # 历史版本
-        st.markdown("<br>", unsafe_allow_html=True)
-        st.markdown("---")
-        st.subheader("历史版本")
-
-        releases = get_all_releases(limit=5)
-        if releases:
-            for r in releases:
-                is_current = r.tag_name == APP_VERSION
-                label = f"{r.tag_name}"
-                if is_current:
-                    label += " (当前)"
-                with st.expander(label):
-                    st.markdown(f"**{r.name}**")
-                    st.caption(f"发布时间: {r.published_at}")
-                    if r.body:
-                        st.markdown(r.body)
-        else:
-            st.info("无法获取版本历史")
 
     st.markdown("---")
 
