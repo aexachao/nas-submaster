@@ -14,6 +14,7 @@ from services.updater import (
     has_update,
     do_update,
     ReleaseInfo,
+    _build_docker_create_args,
 )
 
 
@@ -259,33 +260,66 @@ class TestHasUpdate:
 # do_update
 # ============================================================================
 
+MOCK_CONTAINER = {
+    "Id": "abc123",
+    "Name": "/test-container",
+    "Config": {
+        "Image": "aexachao/nas-subtitle-manager:latest",
+        "Hostname": "test-host",
+        "Env": ["TZ=Asia/Shanghai", "PYTHONUNBUFFERED=1"],
+        "Labels": {"com.docker.compose.project": "nas"},
+    },
+    "HostConfig": {
+        "Binds": ["./data:/data", "/var/run/docker.sock:/var/run/docker.sock"],
+        "PortBindings": {"8501/tcp": [{"HostIp": "", "HostPort": "8501"}]},
+        "RestartPolicy": {"Name": "unless-stopped", "MaximumRetryCount": 0},
+        "NetworkMode": "bridge",
+        "ShmSize": 4294967296,
+    },
+}
+
+
 class TestDoUpdate:
     @patch("services.updater._docker_api")
     @patch("services.updater._get_container_info")
     @patch("services.updater.os.path.exists", return_value=True)
     def test_success(self, mock_exists, mock_info, mock_api):
-        mock_info.return_value = {
-            "Name": "/test-container",
-            "Config": {"Image": "aexachao/nas-subtitle-manager:latest"},
-        }
-        mock_api.return_value = (200, {})
+        mock_info.return_value = MOCK_CONTAINER
+        mock_api.side_effect = [
+            (200, {}),                   # pull image
+            (201, {"Id": "helper456"}),  # create helper
+            (200, {}),                   # start helper
+        ]
         ok, msg = do_update()
         assert ok is True
-        assert "镜像已更新" in msg
-        assert "docker compose" in msg
+        assert "自动重启" in msg
+        # 验证 helper 用的是 docker:cli 镜像
+        create_call = mock_api.call_args_list[1]
+        assert create_call[1]["body"]["Image"] == "docker:cli"
+        assert create_call[1]["body"]["HostConfig"]["AutoRemove"] is True
 
     @patch("services.updater._docker_api")
     @patch("services.updater._get_container_info")
     @patch("services.updater.os.path.exists", return_value=True)
     def test_pull_failure(self, mock_exists, mock_info, mock_api):
-        mock_info.return_value = {
-            "Name": "/test-container",
-            "Config": {"Image": "aexachao/nas-subtitle-manager:latest"},
-        }
+        mock_info.return_value = MOCK_CONTAINER
         mock_api.return_value = (500, "pull failed")
         ok, msg = do_update()
         assert ok is False
         assert "拉取镜像失败" in msg
+
+    @patch("services.updater._docker_api")
+    @patch("services.updater._get_container_info")
+    @patch("services.updater.os.path.exists", return_value=True)
+    def test_helper_create_failure(self, mock_exists, mock_info, mock_api):
+        mock_info.return_value = MOCK_CONTAINER
+        mock_api.side_effect = [
+            (200, {}),    # pull image
+            (500, "err"), # create helper fails
+        ]
+        ok, msg = do_update()
+        assert ok is False
+        assert "更新助手" in msg
 
     @patch("services.updater.os.path.exists", return_value=False)
     def test_socket_not_found(self, mock_exists):
@@ -300,3 +334,46 @@ class TestDoUpdate:
         ok, msg = do_update()
         assert ok is False
         assert "容器信息" in msg
+
+
+class TestBuildDockerCreateArgs:
+    def test_basic_config(self):
+        args = _build_docker_create_args(MOCK_CONTAINER, "myimage:latest")
+        assert "--name" in args
+        assert "test-container" in args
+        assert "myimage:latest" in args[-1]
+
+    def test_preserves_env(self):
+        args = _build_docker_create_args(MOCK_CONTAINER, "img")
+        assert "-e" in args
+        assert "TZ=Asia/Shanghai" in args
+
+    def test_preserves_volumes(self):
+        args = _build_docker_create_args(MOCK_CONTAINER, "img")
+        assert "-v" in args
+        assert "./data:/data" in args
+
+    def test_preserves_ports(self):
+        args = _build_docker_create_args(MOCK_CONTAINER, "img")
+        assert "-p" in args
+        assert "8501:8501" in args
+
+    def test_preserves_restart_policy(self):
+        args = _build_docker_create_args(MOCK_CONTAINER, "img")
+        assert "--restart" in args
+        assert "unless-stopped" in args
+
+    def test_preserves_shm_size(self):
+        args = _build_docker_create_args(MOCK_CONTAINER, "img")
+        assert "--shm-size" in args
+
+    def test_empty_config(self):
+        container = {
+            "Name": "/minimal",
+            "Config": {"Image": "img"},
+            "HostConfig": {},
+        }
+        args = _build_docker_create_args(container, "img")
+        assert "--name" in args
+        assert "minimal" in args
+        assert args[-1] == "img"

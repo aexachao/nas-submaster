@@ -262,17 +262,125 @@ def _get_container_info() -> Optional[dict]:
     return None
 
 
+def _build_docker_create_args(container_info: dict, image: str) -> list:
+    """
+    从容器 inspect 数据还原 `docker create` 的完整命令行参数。
+    保证新容器与旧容器配置一致（端口、卷、环境变量、网络等）。
+
+    Args:
+        container_info: Docker inspect 返回的容器信息
+        image: 新镜像名
+    Returns:
+        docker create 命令的参数列表
+    """
+    config = container_info.get("Config", {})
+    hc = container_info.get("HostConfig", {})
+    name = container_info.get("Name", "").lstrip("/")
+
+    args = ["--name", name]
+
+    # 容器名 / hostname
+    hostname = config.get("Hostname", "")
+    if hostname:
+        args.extend(["--hostname", hostname])
+
+    # 工作目录
+    working_dir = config.get("WorkingDir", "")
+    if working_dir:
+        args.extend(["-w", working_dir])
+
+    # 环境变量
+    for env in config.get("Env", []):
+        args.extend(["-e", env])
+
+    # 绑定挂载（-v）
+    for bind in hc.get("Binds", []):
+        args.extend(["-v", bind])
+
+    # tmpfs 挂载
+    for dest, opts in (hc.get("Tmpfs") or {}).items():
+        args.extend(["--tmpfs", f"{dest}:{opts}" if opts else dest])
+
+    # 端口映射（-p）
+    port_bindings = hc.get("PortBindings") or {}
+    for container_port, bindings in port_bindings.items():
+        cp = container_port.split("/")[0]
+        for binding in (bindings or []):
+            host_ip = binding.get("HostIp", "")
+            host_port = binding.get("HostPort", "")
+            if host_ip and host_ip != "0.0.0.0":
+                args.extend(["-p", f"{host_ip}:{host_port}:{cp}"])
+            elif host_port:
+                args.extend(["-p", f"{host_port}:{cp}"])
+
+    # 重启策略
+    rp = hc.get("RestartPolicy", {})
+    if rp.get("Name") and rp["Name"] != "no":
+        policy = rp["Name"]
+        if rp.get("MaximumRetryCount"):
+            policy += f":{rp['MaximumRetryCount']}"
+        args.extend(["--restart", policy])
+
+    # 网络模式
+    network_mode = hc.get("NetworkMode", "")
+    if network_mode and network_mode != "default":
+        args.extend(["--network", network_mode])
+
+    # 共享内存大小
+    shm_size = hc.get("ShmSize", 0)
+    if shm_size and shm_size != 67108864:  # 64MB 是默认值
+        args.extend(["--shm-size", str(shm_size)])
+
+    # 日志驱动
+    log_config = hc.get("LogConfig", {})
+    log_driver = log_config.get("Type", "")
+    if log_driver and log_driver not in ("json-file", ""):
+        args.extend(["--log-driver", log_driver])
+
+    # 容器标签
+    labels = config.get("Labels", {}) or {}
+    for k, v in labels.items():
+        args.extend(["--label", f"{k}={v}"])
+
+    # 镜像
+    args.append(image)
+
+    return args
+
+
+def _build_update_script(container_name: str, create_args: list) -> str:
+    """
+    构建 helper 容器执行的 shell 脚本。
+    用 docker CLI 完成：停旧容器 → 删旧容器 → 建新容器 → 启动。
+
+    Args:
+        container_name: 当前容器名
+        create_args: docker create 的参数列表
+    Returns:
+        可执行的 shell 脚本
+    """
+    create_cmd = " ".join(create_args)
+    return (
+        f"sleep 3 && "
+        f"docker stop {container_name} && "
+        f"docker rm {container_name} && "
+        f"docker create {create_cmd} && "
+        f"docker start {container_name}"
+    )
+
+
 def do_update() -> tuple:
     """
-    通过 Docker Engine API 拉取最新镜像。
-    容器重启由用户在宿主机执行 docker compose up -d 完成，
-    以保证用户自己的 docker-compose.yml 配置和数据不受影响。
+    自动更新流程：
+    1. 拉取最新镜像
+    2. 启动 helper 容器（docker:cli）接管后续操作
+    3. helper 执行：停旧容器 → 删旧容器 → 用相同配置建新容器 → 启动
+    4. helper 自动清理（--rm）
 
     Returns:
         (success: bool, message: str)
     """
     try:
-        # 检查 Docker Socket 是否可用
         if not os.path.exists(DOCKER_SOCKET):
             return False, (
                 "未找到 Docker Socket，请在 docker-compose.yml 中挂载：\n"
@@ -280,25 +388,43 @@ def do_update() -> tuple:
                 "  - /var/run/docker.sock:/var/run/docker.sock"
             )
 
-        # 获取当前容器信息
         container = _get_container_info()
         if not container:
             return False, "无法获取当前容器信息"
 
-        # 提取镜像名
         image = container.get("Config", {}).get("Image", "")
         if not image:
             return False, "无法获取当前容器镜像名"
 
-        # 只拉取最新镜像，不触碰正在运行的容器
+        container_name = container.get("Name", "").lstrip("/")
+
+        # 1. 拉取最新镜像
         status, resp = _docker_api("POST", f"/images/create?fromImage={image}&tag=latest")
         if status not in (200, 201):
             return False, f"拉取镜像失败: {resp}"
 
-        return True, (
-            "镜像已更新！请在宿主机执行以下命令完成重启：\n"
-            "docker compose pull && docker compose up -d"
-        )
+        # 2. 构建 helper 容器的更新脚本
+        create_args = _build_docker_create_args(container, image)
+        script = _build_update_script(container_name, create_args)
+
+        # 3. 创建 helper 容器（docker:cli 镜像，挂载 Docker Socket）
+        status, resp = _docker_api("POST", "/containers/create", body={
+            "Image": "docker:cli",
+            "Cmd": ["sh", "-c", script],
+            "HostConfig": {
+                "Binds": ["/var/run/docker.sock:/var/run/docker.sock"],
+                "AutoRemove": True,
+                "NetworkMode": container.get("HostConfig", {}).get("NetworkMode", ""),
+            },
+        })
+        if status not in (200, 201):
+            return False, f"启动更新助手失败: {resp}"
+
+        helper_id = resp.get("Id", "")
+        if helper_id:
+            _docker_api("POST", f"/containers/{helper_id}/start")
+
+        return True, "正在更新，容器将自动重启..."
 
     except ConnectionRefusedError:
         return False, "无法连接 Docker Socket，请确认已挂载 /var/run/docker.sock"
