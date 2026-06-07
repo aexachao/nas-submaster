@@ -89,10 +89,24 @@ class SubtitleTranslator:
             timeout=config.timeout,
         )
     
-    def _update_progress(self, current: int, total: int, message: str):
-        """更新进度"""
+    def _update_progress(self, current_lines: int, total_lines: int, message: str):
+        """
+        v1.8.1: 上报翻译进度
+
+        Args:
+            current_lines: 已翻译条数
+            total_lines: 总条数
+            message: 进度消息
+
+        Note:
+            - stage 固定为 'translate'（在 worker 那边决定）
+            - stage_progress 上报 current_lines（让 UI 显示 "已翻译 X/Y 条"）
+            - 不再上报百分比 —— LLM 流式输出长度不可预测，强行算会跳
+        """
         if self.progress_callback:
-            self.progress_callback(current, total, message)
+            # 第一参数是 stage ('translate' 固定), 第二参数是 current_lines
+            # worker 拿到的就是 (stage, stage_progress, message)
+            self.progress_callback("translate", current_lines, message)
     
     def _get_target_lang_name(self) -> str:
         """获取目标语言名称"""
@@ -388,7 +402,7 @@ Now output the COMPLETE JSON array (no extra text, no abbreviations):"""
         # 短视频：一次性翻译
         if total_lines <= max_batch:
             self._update_progress(0, total_lines, f"开始翻译 {total_lines} 行字幕...")
-            
+
             try:
                 translated = self._translate_batch(entries)
                 self._update_progress(total_lines, total_lines, "翻译完成！")

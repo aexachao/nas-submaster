@@ -73,35 +73,12 @@ class TestProgressCalculation:
 
     @pytest.fixture
     def calc(self):
-        """从 whisper_service 抽出来的纯函数（测试用）"""
-        from services.whisper_service import MODEL_TOTAL_SIZE_BYTES
-        from utils.format_utils import format_file_size
-
-        def _calc_pct(current_bytes: int, model_size: str) -> int:
-            total = MODEL_TOTAL_SIZE_BYTES.get(model_size, 0)
-            if total <= 0 or current_bytes <= 0:
-                return 5
-            raw = (current_bytes / total) * 100
-            return max(5, min(99, int(raw + 0.5)))
-
-        def _format_message(current_bytes: int, model_size: str) -> str:
-            total = MODEL_TOTAL_SIZE_BYTES.get(model_size, 0)
-            if total > 0 and current_bytes > 0:
-                pct = _calc_pct(current_bytes, model_size)
-                return (
-                    f"正在下载模型 {model_size}... "
-                    f"{format_file_size(current_bytes)} / "
-                    f"{format_file_size(total)} ({pct}%)"
-                )
-            elif current_bytes > 0:
-                return (
-                    f"正在下载模型 {model_size}... "
-                    f"已下载 {format_file_size(current_bytes)}"
-                )
-            else:
-                return f"正在下载模型 {model_size}..."
-
-        return _calc_pct, _format_message
+        """v1.8.1: 直接用 whisper_service 的真函数（避免 fixture 跟真代码漂移）"""
+        from services.whisper_service import (
+            _calc_download_pct,
+            _format_download_message,
+        )
+        return _calc_download_pct, _format_download_message
 
     @pytest.mark.parametrize("model_size,expected_total", [
         ("tiny", 78_207_087),
@@ -110,10 +87,10 @@ class TestProgressCalculation:
         ("medium", 1_530_575_217),
         ("large-v3", 3_090_839_273),
     ])
-    def test_pct_at_zero_is_clamped_to_5(self, calc, model_size, expected_total):
-        """0 字节时进度不应该显示 0%（让用户知道下载确实开始了）"""
+    def test_pct_at_zero_is_zero(self, calc, model_size, expected_total):
+        """0 字节时进度是 0.00%（v1.8.1: 不再 clamp 到 5%，0 就是 0）"""
         _calc_pct, _ = calc
-        assert _calc_pct(0, model_size) == 5
+        assert _calc_pct(0, model_size) == 0.0
 
     @pytest.mark.parametrize("model_size,expected_total", [
         ("tiny", 78_207_087),
@@ -121,20 +98,33 @@ class TestProgressCalculation:
         ("medium", 1_530_575_217),
     ])
     def test_pct_at_half(self, calc, model_size, expected_total):
-        """下载一半应该是 ~50%（±1）"""
+        """下载一半应该是 50.00%"""
         _calc_pct, _ = calc
-        assert _calc_pct(expected_total // 2, model_size) == 50
+        assert _calc_pct(expected_total // 2, model_size) == 50.0
 
-    def test_pct_clamped_to_99(self, calc):
-        """超过总大小（理论错误）应该 clamp 到 99 而不是 ≥100"""
+    def test_pct_at_100(self, calc):
+        """下载完成应该是 100.00%"""
         _calc_pct, _ = calc
-        # 给一个不可能的"超量"（实际不会出现，但测试 clamp 行为）
-        assert _calc_pct(78_207_087 * 2, "tiny") == 99
+        assert _calc_pct(78_207_087, "tiny") == 100.0
 
-    def test_pct_unknown_model_falls_back(self, calc):
-        """未知 model size 走 fallback（5%）"""
+    def test_pct_above_100_is_clamped(self, calc):
+        """超过总大小应该 clamp 到 100（v1.8.1 改：不再 99）"""
         _calc_pct, _ = calc
-        assert _calc_pct(1_000_000, "nonexistent-model") == 5
+        assert _calc_pct(78_207_087 * 2, "tiny") == 100.0
+
+    def test_pct_returns_float_with_two_decimals_precision(self, calc):
+        """47.32% 这样的两位小数能精确表示（round-trip）"""
+        _calc_pct, _ = calc
+        # 35% of tiny
+        target_bytes = int(78_207_087 * 0.35)
+        pct = _calc_pct(target_bytes, "tiny")
+        # 允许 0.01 误差（round 之后的浮点）
+        assert abs(pct - 35.0) < 0.01
+
+    def test_pct_unknown_model_returns_zero(self, calc):
+        """未知 model size 返回 0.0（不再 fallback 到 5）"""
+        _calc_pct, _ = calc
+        assert _calc_pct(1_000_000, "nonexistent-model") == 0.0
 
     def test_message_contains_all_three_pieces(self, calc):
         """message 必须同时显示 已下载 / 总大小 / 百分比 三项"""
@@ -142,8 +132,8 @@ class TestProgressCalculation:
         msg = _format_message(78_207_087 // 2, "tiny")  # 50% tiny
         # 总大小（74.6 MB，固定）
         assert "74.6 MB" in msg, f"缺总大小: {msg}"
-        # 百分比
-        assert "(50%)" in msg, f"缺百分比: {msg}"
+        # 百分比：v1.8.1 改为两位小数
+        assert "(50.00%)" in msg, f"缺两位小数百分比: {msg}"
         # 已下载：format_file_size 用 1024 进制，78_207_087/2/1024/1024 = 37.3 MB
         # 不强求确切值，只验证有"MB" + 数字格式
         import re
@@ -158,6 +148,17 @@ class TestProgressCalculation:
         assert "medium" in msg
         # 进度数字
         assert "%" in msg
+
+    def test_message_uses_two_decimal_format(self, calc):
+        """v1.8.1: 百分比必须是两位小数格式 (.2f)"""
+        _, _format_message = calc
+        # 任意非零进度都应该是 XX.XX% 格式
+        msg = _format_message(78_207_087 // 3, "tiny")
+        import re
+        # 匹配 "(数字.数字%)" 形式
+        assert re.search(r"\(\d+\.\d{2}%\)", msg), (
+            f"百分比不是两位小数: {msg}"
+        )
 
     def test_message_fallback_when_unknown_size(self, calc):
         """未知 model size 只显示"已下载"（兼容老逻辑）"""

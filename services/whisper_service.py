@@ -40,6 +40,60 @@ MODEL_TOTAL_SIZE_BYTES = {
 }
 
 
+def _calc_download_pct(current_bytes: int, model_size: str) -> float:
+    """
+    计算 Whisper 模型下载的段内进度（0.0 - 100.0）
+
+    v1.8.1: 返回两位小数 float，clamp 到 [0, 100]。
+
+    旧版本（v1.7.7-v1.8.0）返回 int，clamp 到 [5, 99]，避免 0% 让用户以为卡死
+    也不显示 100%（避免和后续字幕提取阶段的 50% 衔接时 UI 回跳）。
+    新版本不再需要这些 hack：下载是独立阶段，0% 就是 0%，100% 就是 100%。
+
+    Args:
+        current_bytes: 已下载字节数
+        model_size: 模型大小 ('tiny', 'base', 'small', 'medium', 'large-v3')
+
+    Returns:
+        0.0 - 100.0 的两位小数
+    """
+    total = MODEL_TOTAL_SIZE_BYTES.get(model_size, 0)
+    if total <= 0 or current_bytes <= 0:
+        return 0.0
+    raw = (current_bytes / total) * 100
+    return round(min(100.0, raw), 2)
+
+
+def _format_download_message(current_bytes: int, model_size: str) -> str:
+    """
+    格式化下载进度消息
+
+    Args:
+        current_bytes: 已下载字节数
+        model_size: 模型大小
+
+    Returns:
+        "正在下载模型 X... 47.32 MB / 74.6 MB (47.32%)" 或 fallback
+    """
+    from utils.format_utils import format_file_size
+
+    total = MODEL_TOTAL_SIZE_BYTES.get(model_size, 0)
+    if total > 0 and current_bytes > 0:
+        pct = _calc_download_pct(current_bytes, model_size)
+        return (
+            f"正在下载模型 {model_size}... "
+            f"{format_file_size(current_bytes)} / "
+            f"{format_file_size(total)} ({pct:.2f}%)"
+        )
+    elif current_bytes > 0:
+        return (
+            f"正在下载模型 {model_size}... "
+            f"已下载 {format_file_size(current_bytes)}"
+        )
+    else:
+        return f"正在下载模型 {model_size}..."
+
+
 def _check_hf_endpoint_compat() -> None:
     """
     检测并警告 HF_ENDPOINT 与 huggingface_hub 不兼容的常见配置。
@@ -240,7 +294,7 @@ class WhisperService:
                 initial_msg = (
                     f"首次使用，正在下载模型 {self.config.model_size}..."
                 )
-            progress_callback(0, 100, initial_msg)
+            progress_callback("download", 0.0, initial_msg)
 
             # 启动后台线程轮询下载目录大小，定时上报进度
             stop_event = threading.Event()
@@ -248,27 +302,24 @@ class WhisperService:
             model_dir = Path(self.model_dir)
 
             def _poll_download():
-                # 进度计算区间 [5, 49]：下载阶段占用任务 5%~49%，
-                # 留 50% 给实际字幕提取（worker 那边会 50+int(...) 算）
+                # v1.8.1: 下载阶段独立进度 0-100% (两位小数)，
+                # 不再走旧的 [5, 99] 区间 hack，UI 会按 stage 字段展示。
                 while not stop_event.is_set():
                     try:
-                        # 2026-06-06: 在 poll 回调里也调 progress_callback,
-                        # 让 worker 的取消检测(在 progress_callback 里)能触发
-                        # → raise InterruptedError → 中断 download
                         if model_total_bytes > 0:
                             current_bytes = sum(
                                 f.stat().st_size
                                 for f in model_dir.rglob('*')
                                 if f.is_file()
                             )
-                            raw_pct = (current_bytes / model_total_bytes) * 100
-                            pct = max(5, min(99, int(raw_pct + 0.5)))
+                            pct = _calc_download_pct(
+                                current_bytes, self.config.model_size
+                            )
                             progress_callback(
-                                pct, 100,
-                                f"正在下载模型 {self.config.model_size}... "
-                                f"{format_file_size(current_bytes)} / "
-                                f"{format_file_size(model_total_bytes)} "
-                                f"({pct}%)"
+                                "download", pct,
+                                _format_download_message(
+                                    current_bytes, self.config.model_size
+                                )
                             )
                         else:
                             current_bytes = sum(
@@ -278,7 +329,7 @@ class WhisperService:
                             )
                             if current_bytes > 0:
                                 progress_callback(
-                                    5, 100,
+                                    "download", 0.0,
                                     f"正在下载模型 {self.config.model_size}... "
                                     f"已下载 {format_file_size(current_bytes)}"
                                 )
@@ -378,9 +429,9 @@ class WhisperService:
         if output_path is None:
             output_path = str(Path(video_path).with_suffix('.srt'))
         
-        # 更新进度
+        # 更新进度（v1.8.1: 新协议 stage='extract'，stage_progress 独立 0-100%）
         if progress_callback:
-            progress_callback(5, 100, f"开始提取字幕...")
+            progress_callback("extract", 0.0, f"开始提取字幕...")
         
         # 准备转录参数
         transcribe_params = {
@@ -405,7 +456,7 @@ class WhisperService:
             if progress_callback:
                 from utils.format_utils import get_lang_name
                 lang_name = get_lang_name(info.language)
-                progress_callback(15, 100, f"检测语言: {lang_name}")
+                progress_callback("extract", 5.0, f"检测语言: {lang_name}")
             
             # 写入 SRT 文件
             with open(output_path, 'w', encoding='utf-8') as f:
@@ -423,12 +474,14 @@ class WhisperService:
                     
                     # 更新进度
                     if progress_callback and idx % 10 == 0:
-                        progress = 15 + min(35, int(idx / 300 * 35))
-                        progress_callback(progress, 100, f"已转写 {idx} 行")
+                        # v1.8.1: 提取阶段 5-95% 区间（5% 给"检测语言"，95% 给"完成"）
+                        # 不再硬塞进 5-50% 区间（worker 不再算 50+int(...)）
+                        progress = 5.0 + min(90.0, (idx / 300) * 90.0)
+                        progress_callback("extract", progress, f"已转写 {idx} 行")
             
             # 完成
             if progress_callback:
-                progress_callback(50, 100, f"字幕提取完成 ({idx} 行)")
+                progress_callback("extract", 100.0, f"字幕提取完成 ({idx} 行)")
             
             return output_path
         

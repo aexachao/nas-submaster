@@ -296,6 +296,8 @@ class Task:
     progress: int = 0
     log: str = ''
     log_history: str = ''
+    stage: str = 'pending'              # v1.8.1+: 当前阶段 (download/extract/translate/...)
+    stage_progress: Optional[float] = None  # v1.8.1+: 段内进度 0.0-100.0（两位小数）
     created_at: Optional[str] = None
     updated_at: Optional[str] = None
 

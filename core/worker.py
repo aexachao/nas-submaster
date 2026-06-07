@@ -421,9 +421,18 @@ class TaskWorker:
 
             whisper = self._get_whisper_service(config)
 
-            def progress_callback(current, total, message):
+            def progress_callback(stage, stage_progress, message):
+                """
+                v1.8.1 协议：callback(stage, stage_progress, message)
+                - stage: 'download' / 'extract' / 'translate' / ...
+                - stage_progress: 0.0-100.0 浮点（两位小数），或翻译阶段的 current_line 整数
+                - 提取阶段既上报 'download'（whisper 模型下载中）也上报 'extract'（转写中）
+                """
                 # 进度回调仅覆盖 log（高频更新不写历史，避免数据库膨胀）
-                TaskDAO.update_task(task_id, progress=current, log=message)
+                TaskDAO.update_task(
+                    task_id, log=message,
+                    stage=stage, stage_progress=stage_progress,
+                )
                 # 在回调中检测取消，触发后通过异常中断 Whisper 提取
                 if self._check_cancelled(task_id):
                     raise InterruptedError("任务已取消")
@@ -481,10 +490,16 @@ class TaskWorker:
             # 获取当前内容类型对应的提示词模板
             prompt_template = config.get_prompt_template(config.content_type)
 
-            def progress_callback(current, total, message):
-                progress = 50 + int((current / total) * 45)
+            def progress_callback(stage, stage_progress, message):
+                """
+                v1.8.1 协议：翻译阶段 callback 上报 stage='translate'，stage_progress 是
+                当前已翻译条数（不是百分比 —— LLM 流式输出长度不可预测）。
+                """
                 # 翻译进度高频更新，仅覆盖 log 不写历史
-                TaskDAO.update_task(task_id, progress=progress, log=message)
+                TaskDAO.update_task(
+                    task_id, log=message,
+                    stage=stage, stage_progress=stage_progress,
+                )
 
             success, msg = translate_srt_file(
                 srt_path,

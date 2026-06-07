@@ -70,10 +70,8 @@ def _render_task_card(task, idx: int):
     created_at = html.escape(str(task.created_at or ''))
     status_text_escaped = html.escape(status_text)
 
-    # 进度条 HTML (单行)
-    progress_html = ""
-    if task.status == TaskStatus.PROCESSING:
-        progress_html = f"""<div style="margin-top:12px; margin-bottom:8px;"><div style="width:100%; height:4px; background-color:#27272a; border-radius:2px; overflow:hidden;"><div style="width:{task.progress}%; height:100%; background-color:#2563eb; transition:width 0.3s;"></div></div><div style="font-size:11px; color:#71717a; margin-top:4px; text-align:right;">{task.progress}%</div></div>"""
+    # v1.8.1: 步骤条 HTML (代替旧版单行进度条)
+    progress_html = build_stage_progress_html(task)
 
     html_content = f"""<div class="task-card-wrapper"><div class="hero-card"><div style="display:flex; justify-content:space-between; align-items:flex-start;"><div style="flex:1;"><div style="font-weight:600; margin-bottom:8px;">{file_name}</div><div style="font-size:13px; color:#a1a1aa;">&gt; {log_text}</div></div><div style="display:flex; flex-direction:column; align-items:flex-end; gap:8px; margin-left:16px;"><span style="font-size:11px; color:#71717a;">{created_at}</span><span class="status-chip {css_class}">{status_text_escaped}</span></div></div>{progress_html}</div></div>"""
 
@@ -122,3 +120,161 @@ def _render_task_card(task, idx: int):
             if st.button("删除", key=f"t{idx}_{task.id}_{task.status.value}_del", use_container_width=True):
                 TaskDAO.delete_task(task.id)
                 st.rerun()
+
+
+# ============================================================================
+# 步骤条渲染 (v1.8.1) — 抽离成纯函数方便单测
+# ============================================================================
+
+# 阶段显示顺序（与 task.lifecycle 严格匹配）
+STAGE_ORDER = ("download", "extract", "translate")
+
+# 阶段中文标签
+STAGE_LABELS = {
+    "download": "下载",
+    "extract": "提取",
+    "translate": "翻译",
+}
+
+# 状态色：已完成 / 进行中 / 未开始
+STATUS_DONE = "done"
+STATUS_ACTIVE = "active"
+STATUS_PENDING = "pending"
+
+
+def _stage_state(stage: str, current_stage: str) -> str:
+    """
+    判断 stage 相对 current_stage 的状态。
+
+    - current_stage 之前的 → done
+    - current_stage 本身 → active
+    - current_stage 之后的 → pending
+
+    边界：
+    - current_stage='completed' → 全部 done
+    - current_stage='failed'/'cancelled' → 保留最后 stage 状态
+    """
+    if current_stage == "completed":
+        return STATUS_DONE
+    try:
+        cur_idx = STAGE_ORDER.index(current_stage)
+    except ValueError:
+        # failed/cancelled/pending 等异常 stage
+        return STATUS_PENDING
+    try:
+        idx = STAGE_ORDER.index(stage)
+    except ValueError:
+        return STATUS_PENDING
+    if idx < cur_idx:
+        return STATUS_DONE
+    if idx == cur_idx:
+        return STATUS_ACTIVE
+    return STATUS_PENDING
+
+
+def _format_stage_progress(stage: str, stage_progress, current_stage: str) -> str:
+    """
+    格式化阶段的进度文字。
+
+    - download/extract: "47.32%" (两位小数)
+    - translate: "已翻译 47 条" (整数 = current_line)
+    - done: "100%"
+    """
+    if stage_progress is None:
+        return ""
+    if stage == "translate":
+        # stage_progress 是 current_line（整数）
+        try:
+            return f"已翻译 {int(stage_progress)} 条"
+        except (TypeError, ValueError):
+            return ""
+    # download / extract：两位小数
+    try:
+        return f"{float(stage_progress):.2f}%"
+    except (TypeError, ValueError):
+        return ""
+
+
+def _status_marker(state: str) -> str:
+    """返回状态的视觉标识符"""
+    return {
+        STATUS_DONE: "✓",
+        STATUS_ACTIVE: "⏳",
+        STATUS_PENDING: "○",
+    }.get(state, "○")
+
+
+def _status_color(state: str) -> str:
+    """返回状态对应的颜色"""
+    return {
+        STATUS_DONE: "#10b981",      # 绿
+        STATUS_ACTIVE: "#2563eb",    # 蓝
+        STATUS_PENDING: "#52525b",   # 灰
+    }.get(state, "#52525b")
+
+
+def build_stage_progress_html(task) -> str:
+    """
+    渲染任务的多阶段步骤条 HTML（v1.8.1）。
+
+    Args:
+        task: Task 数据类实例
+
+    Returns:
+        完整的 HTML 片段（CSS 内联，可直接 st.markdown）
+
+    行为：
+    - pending/无 stage 数据 → fallback 旧版 progress 字段单行进度条
+    - processing/completed/failed → 渲染三阶段步骤条
+    """
+    # Fallback：旧 DB 没有 stage 字段
+    if not task.stage or task.stage == "pending" and task.status == TaskStatus.PENDING:
+        # 旧版单行进度条
+        if task.status == TaskStatus.PROCESSING:
+            return (
+                f'<div style="margin-top:12px; margin-bottom:8px;">'
+                f'<div style="width:100%; height:4px; background-color:#27272a; border-radius:2px; overflow:hidden;">'
+                f'<div style="width:{task.progress}%; height:100%; background-color:#2563eb; transition:width 0.3s;"></div>'
+                f'</div>'
+                f'<div style="font-size:11px; color:#71717a; margin-top:4px; text-align:right;">{task.progress}%</div>'
+                f'</div>'
+            )
+        return ""
+
+    # 阶段列表（仅显示有意义的阶段；未来可加 export）
+    current_stage = task.stage
+
+    # 构建每个阶段的 HTML
+    stage_chips = []
+    for s in STAGE_ORDER:
+        state = _stage_state(s, current_stage)
+        marker = _status_marker(state)
+        color = _status_color(state)
+        label = STAGE_LABELS[s]
+
+        # 当前阶段的进度文字
+        progress_text = ""
+        if state == STATUS_DONE:
+            progress_text = "100%"
+        elif state == STATUS_ACTIVE:
+            progress_text = _format_stage_progress(s, task.stage_progress, current_stage)
+
+        chip = (
+            f'<div style="display:inline-flex; align-items:center; gap:6px; '
+            f'padding:4px 10px; background-color:{color}22; border:1px solid {color}; '
+            f'border-radius:12px; font-size:12px;">'
+            f'<span style="color:{color}; font-weight:bold;">{marker}</span>'
+            f'<span style="color:#e4e4e7;">{label}</span>'
+            f'<span style="color:{color}; font-size:11px;">{html.escape(progress_text)}</span>'
+            f'</div>'
+        )
+        stage_chips.append(chip)
+
+    # 用箭头连接
+    chips_html = '<span style="color:#52525b; margin:0 6px;">→</span>'.join(stage_chips)
+
+    return (
+        f'<div style="margin-top:12px; margin-bottom:8px; display:flex; flex-wrap:wrap; gap:4px; align-items:center;">'
+        f'{chips_html}'
+        f'</div>'
+    )
