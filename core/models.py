@@ -164,8 +164,15 @@ class ProviderConfig:
 
 @dataclass
 class WhisperConfig:
-    """Whisper 模型配置"""
-    model_size: str = 'base'
+    """Whisper 模型配置
+
+    v1.8.2: 默认 model_size 从 'base' 改为 'medium'。
+    原因：base 141MB 模型对长视频识别准确率偏低（特别是多语言/有口音场景），
+    medium 1.5GB 准确率显著更好，NAS 场景下值得多花下载时间。
+    内存 ≥ 8GB 都跑得动 int8 量化。
+    升级后首次运行会下载 1.5GB 模型（之前 base 是 141MB）。
+    """
+    model_size: str = 'medium'  # v1.8.2+: 默认 medium
     compute_type: str = 'int8'
     device: str = 'cpu'
     source_language: str = 'auto'
@@ -181,8 +188,13 @@ class WhisperConfig:
 
 @dataclass
 class TranslationConfig:
-    """翻译配置"""
-    enabled: bool = False
+    """翻译配置
+
+    v1.8.2: 默认 enabled 从 False 改为 True。
+    原因：用户装这个工具就是为了"提取+翻译"，默认开翻译更符合使用场景。
+    升级时已经存了 enable_translation=false 的用户不受影响（DB 里有值就用 DB 的）。
+    """
+    enabled: bool = True  # v1.8.2+: 默认开启
     target_language: str = 'zh'
     use_embedded_subtitle: bool = True  # 优先使用内置字幕（如果有）
     max_lines_per_batch: int = 500

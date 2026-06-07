@@ -12,7 +12,7 @@ from dataclasses import dataclass, field, asdict
 
 
 # 应用版本号（每次发版手动更新）
-APP_VERSION = "v1.8.1"
+APP_VERSION = "v1.8.2"
 
 from core.models import (
     ContentType,
@@ -443,13 +443,13 @@ class ConfigManager:
             # 构建嵌套配置字典
             data = {
                 'whisper': {
-                    'model_size': config_dict.get('whisper_model', 'base'),
+                    'model_size': config_dict.get('whisper_model', 'medium'),  # v1.8.2+
                     'compute_type': config_dict.get('compute_type', 'int8'),
                     'device': config_dict.get('device', 'cpu'),
                     'source_language': config_dict.get('source_language', 'auto')
                 },
                 'translation': {
-                    'enabled': config_dict.get('enable_translation', 'false') == 'true',
+                    'enabled': config_dict.get('enable_translation', 'true') == 'true',  # v1.8.2+
                     'target_language': config_dict.get('target_language', 'zh'),
                     'max_lines_per_batch': int(config_dict.get('max_lines_per_batch', 500)),
                     'timeout': int(config_dict.get('timeout', 600))
